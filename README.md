@@ -1,3 +1,3 @@
-# uloong
+# Uloong
 
-uloong is a light weight agent friendly browser written in rust.
+Uloong is an embedded chess agent written in Rust.
