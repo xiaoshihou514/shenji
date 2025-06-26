@@ -1,3 +1,3 @@
-# Uloong
+# Shenji
 
-Uloong is an embedded chess agent written in Rust.
+Shenji is an embedded chess agent written in Rust.
