@@ -1,15 +1,20 @@
 from __future__ import annotations
-import torch
+
 from pathlib import Path
+
+import torch
 from torch.utils.data import DataLoader
+
+from .config import TrainConfig
 from .dataset import MultiShard
 from .model import ChessTransformer
-from .config import TrainConfig
 from .move_vocab import MoveVocab
+
 
 def main():
     import argparse
     import json
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--data", required=True)
@@ -40,10 +45,13 @@ def main():
             correct_top1 += (pred[:, 0] == y).sum().item()
             correct_topk += (pred == y.unsqueeze(1)).any(dim=1).sum().item()
 
-    print(json.dumps({
-        "top1": correct_top1 / total,
-        f"top{args.topk}": correct_topk / total
-    }, indent=2))
+    print(
+        json.dumps(
+            {"top1": correct_top1 / total, f"top{args.topk}": correct_topk / total},
+            indent=2,
+        )
+    )
+
 
 if __name__ == "__main__":
     main()

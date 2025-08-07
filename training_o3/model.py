@@ -1,8 +1,12 @@
 from __future__ import annotations
+
 import math
+
 import torch
-from torch import nn, Tensor
+from torch import Tensor, nn
+
 from .move_vocab import VOCAB_SIZE
+
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, max_len: int = 65):
@@ -17,6 +21,7 @@ class PositionalEncoding(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         return x + self.pe[: x.size(1)]
 
+
 class ChessTransformer(nn.Module):
     def __init__(
         self,
@@ -27,7 +32,7 @@ class ChessTransformer(nn.Module):
         dropout: float,
     ):
         super().__init__()
-        self.embed = nn.Embedding(13, d_model)     # 13 piece ids incl. empty
+        self.embed = nn.Embedding(13, d_model)  # 13 piece ids incl. empty
         self.cls_embed = nn.Embedding(2, d_model)  # side-to-move token
         self.pos_enc = PositionalEncoding(d_model)
         enc_layer = nn.TransformerEncoderLayer(
@@ -36,7 +41,7 @@ class ChessTransformer(nn.Module):
         self.encoder = nn.TransformerEncoder(enc_layer, num_layers)
         self.head = nn.Linear(d_model, VOCAB_SIZE)
 
-    def forward(self, x: Tensor) -> Tensor:        # x: (B, 65)
+    def forward(self, x: Tensor) -> Tensor:  # x: (B, 65)
         cls, squares = x[:, :1], x[:, 1:]
         emb = torch.cat(
             [self.cls_embed(cls), self.embed(squares)],

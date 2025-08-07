@@ -4,7 +4,9 @@ move_vocab.py - universal UCI-move vocabulary.
 Maps every syntactically legal UCI move to a unique integer id.
 Moves that are illegal in the *current* position are masked at inference.
 """
+
 from __future__ import annotations
+
 import chess
 
 __all__ = ["MoveVocab", "VOCAB_SIZE"]
@@ -30,7 +32,7 @@ class MoveVocab:
                 idx += 1
 
                 # Add promotions when moving from 2nd or 7th rank
-                if chess.square_rank(from_sq) in (1, 6):           # pawn start ranks
+                if chess.square_rank(from_sq) in (1, 6):  # pawn start ranks
                     for promo in promotions:
                         move_str = uci + promo
                         cls._move_to_idx[move_str] = idx
