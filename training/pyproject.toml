@@ -8,6 +8,8 @@ dependencies = [
     "matplotlib>=3.10.3",
     "numpy>=2.2.6",
     "python-chess>=1.999",
-    "torch>=2.7.1",
+    "torch>=2.8.0",
     "tqdm>=4.67.1",
+    "tensorboard>=2.20",
+    "zstandard>=0.23.0",
 ]

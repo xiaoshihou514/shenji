@@ -9,7 +9,7 @@ from torch.utils.data import Dataset, DataLoader, random_split
 import chess
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from common import config, BoardEncoder, ChessTransformer
+from training.common import config, BoardEncoder, ChessTransformer
 
 # 数据集类
 class ChessDataset(Dataset[tuple[Tensor, Tensor]]):

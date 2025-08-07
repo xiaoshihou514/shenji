@@ -4,7 +4,7 @@ import chess
 import chess.svg
 import subprocess
 import shutil
-from common import config, BoardEncoder, ChessTransformer
+from training.common import config, BoardEncoder, ChessTransformer
 
 # 加载模型
 def load_model(path):
