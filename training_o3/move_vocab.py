@@ -5,8 +5,6 @@ Maps every syntactically legal UCI move to a unique integer id.
 Moves that are illegal in the *current* position are masked at inference.
 """
 
-from __future__ import annotations
-
 import chess
 
 __all__ = ["MoveVocab", "VOCAB_SIZE"]

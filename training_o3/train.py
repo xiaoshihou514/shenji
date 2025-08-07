@@ -1,7 +1,5 @@
 """Train the ChessTransformer on pre-processed Lichess shards."""
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import torch

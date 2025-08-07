@@ -8,8 +8,6 @@ Each square is encoded as an *integer piece id* ∈ [0, 13]:
 Side-to-move is appended as the 65-th CLS token: 0 = white, 1 = black.
 """
 
-from __future__ import annotations
-
 import chess
 import torch
 from torch import Tensor

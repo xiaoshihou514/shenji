@@ -8,7 +8,6 @@ $ python scripts/preprocess_pgn.py \
       --out-dir ./data \
       --shard-size 1_000_000 --max-games 5_000_000
 """
-from __future__ import annotations
 
 import argparse
 import io
