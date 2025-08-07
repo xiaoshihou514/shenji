@@ -3,3 +3,4 @@ inference/target/
 data
 __pycache__
 checkpoints
+logs
