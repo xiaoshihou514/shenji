@@ -6,7 +6,6 @@ from torch.utils.data import DataLoader
 from .config import TrainConfig
 from .dataset import MultiShard
 from .model import ChessTransformer
-from .move_vocab import MoveVocab
 
 
 def main():
