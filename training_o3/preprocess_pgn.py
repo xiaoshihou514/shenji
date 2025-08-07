@@ -42,7 +42,8 @@ def main():
         xs, ys = [], []
 
         for game in tqdm(iter(lambda: chess.pgn.read_game(buf), None)):
-            if game is None or (args.max_games and game_no >= args.max_games):
+            hs = game.headers
+            if game is None or not (int(hs["WhiteElo"]) >= 2000 and int(hs["BlackElo"]) >= 2000) or (args.max_games and game_no >= args.max_games):
                 break
             board = game.board()
             for move in game.mainline_moves():
