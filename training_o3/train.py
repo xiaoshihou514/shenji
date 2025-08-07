@@ -11,7 +11,7 @@ from .utils import save_checkpoint, timestamp
 from torch.utils.tensorboard import SummaryWriter
 
 def main():
-    import argparse, os, random, numpy as np
+    import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--data", required=True)
