@@ -2,7 +2,7 @@
 A static bidirectional mapping between every legal *UCI* move on a blank board and an
 integer id in [0, VOCAB_SIZE).
 
-For simplicity we consider all 4672 origin-destination pairs plus 4×8 promotion squares.
+For simplicity we consider all 4672 origin-destination pairs plus 4x8 promotion squares.
 Moves that are illegal in a concrete position receive zero probability after masking.
 """
 from __future__ import annotations

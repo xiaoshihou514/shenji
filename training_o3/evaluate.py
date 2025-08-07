@@ -8,7 +8,8 @@ from .config import TrainConfig
 from .move_vocab import MoveVocab
 
 def main():
-    import argparse, json
+    import argparse
+    import json
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--data", required=True)

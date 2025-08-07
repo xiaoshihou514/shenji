@@ -9,7 +9,11 @@ $ python scripts/preprocess_pgn.py \
       --shard-size 1_000_000 --max-games 5_000_000
 """
 from __future__ import annotations
-import argparse, zstandard as zstd, chess.pgn, io, numpy as np
+import argparse
+import zstandard as zstd
+import chess.pgn
+import io
+import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 from training_o3.encoder import BoardEncoder

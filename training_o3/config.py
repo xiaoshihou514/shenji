@@ -1,7 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
-import yaml
 
 @dataclass(frozen=True, slots=True)
 class TrainConfig:
@@ -31,6 +30,7 @@ class TrainConfig:
 
     @staticmethod
     def load(cfg_path: str | Path) -> "TrainConfig":
+        import yaml
         raw = yaml.safe_load(Path(cfg_path).read_text())
         raw["data_dir"] = Path(raw["data_dir"]).expanduser()
         raw["save_dir"] = Path(raw["save_dir"]).expanduser()
