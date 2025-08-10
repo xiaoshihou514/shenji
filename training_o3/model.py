@@ -14,6 +14,7 @@ class PositionalEncoding(nn.Module):
         div = torch.exp(torch.arange(0, d_model, 2) * -(math.log(10000.0) / d_model))
         self.pe[:, 0::2] = torch.sin(pos * div)
         self.pe[:, 1::2] = torch.cos(pos * div)
+        self.register_buffer('somename', self.pe)
 
     def forward(self, x: Tensor) -> Tensor:
         return x + self.pe[: x.size(1)]

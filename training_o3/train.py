@@ -67,7 +67,7 @@ def main() -> None:
         )
 
         for x, y in pbar:
-            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+            x, y = x.to(device), y.to(device)
             logits = model(x)
             loss = crit(logits, y)
 
@@ -111,7 +111,7 @@ def evaluate(model, loader, crit, device, writer, step):
         for i, (x, y) in enumerate(loader):
             if n >= 50_000:
                 break
-            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+            x, y = x.to(device), y.to(device)
             logits = model(x)
             loss_tot += crit(logits, y).item() * y.size(0)
             acc_tot += (logits.argmax(1) == y).float().sum().item()
