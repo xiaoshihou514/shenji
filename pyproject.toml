@@ -2,7 +2,7 @@
 name = "shenji"
 version = "0.1.0"
 description = "Transformer-based chess AI — training, evaluation, and interactive play"
-readme = "../README.md"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     # Install PyTorch with CUDA 12.x manually before 'uv sync':
