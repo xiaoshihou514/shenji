@@ -1,0 +1,36 @@
+[project]
+name = "shenji"
+version = "0.1.0"
+description = "Transformer-based chess AI — training, evaluation, and interactive play"
+readme = "../README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # Install PyTorch with CUDA 12.x manually before 'uv sync':
+    #   pip install torch --index-url https://download.pytorch.org/whl/cu121
+    # or add it as a direct dependency:
+    #   uv add torch --index-url https://download.pytorch.org/whl/cu121
+    "torch>=2.3.0",
+    "python-chess>=1.999",
+    "numpy>=1.26",
+    "zstandard>=0.22",
+    "tqdm>=4.66",
+    "tensorboard>=2.16",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black>=24.0",
+    "isort>=5.13",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.black]
+line-length = 100
+
+[tool.isort]
+profile = "black"
+line_length = 100

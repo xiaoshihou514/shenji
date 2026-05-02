@@ -1,0 +1,57 @@
+"""config.py – frozen training configuration loaded from YAML."""
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+__all__ = ["TrainConfig"]
+
+
+@dataclass(frozen=True, slots=True)
+class TrainConfig:
+    # ── data ──────────────────────────────────────────────────────────────────
+    data_dir: Path
+    shard_pattern: str
+    num_workers: int
+
+    # ── model ─────────────────────────────────────────────────────────────────
+    d_model: int
+    nhead: int
+    num_layers: int
+    dim_feedforward: int
+    dropout: float
+
+    # ── optimiser ─────────────────────────────────────────────────────────────
+    lr: float
+    min_lr: float
+    weight_decay: float
+    betas: tuple[float, float]
+    clip_grad_norm: float
+    warmup_steps: int
+
+    # ── training ──────────────────────────────────────────────────────────────
+    batch_size: int
+    grad_accum: int          # gradient accumulation steps
+    epochs: int
+
+    # ── logging / checkpointing ───────────────────────────────────────────────
+    log_every: int           # log every N optimiser steps
+    eval_every: int          # eval every N optimiser steps
+    save_dir: Path
+
+    # ── optional resume ───────────────────────────────────────────────────────
+    resume: Path | None = None
+
+    @staticmethod
+    def load(cfg_path: str | Path) -> "TrainConfig":
+        import yaml
+
+        raw: dict[str, Any] = yaml.safe_load(Path(cfg_path).read_text())
+        raw["data_dir"] = Path(raw["data_dir"]).expanduser()
+        raw["save_dir"] = Path(raw["save_dir"]).expanduser()
+        raw["betas"] = tuple(raw["betas"])
+        if raw.get("resume"):
+            raw["resume"] = Path(raw["resume"]).expanduser()
+        else:
+            raw.pop("resume", None)
+        return TrainConfig(**raw)

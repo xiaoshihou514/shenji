@@ -1,0 +1,1 @@
+"""Shenji chess AI package."""
