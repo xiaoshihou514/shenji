@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from .board import VOCAB_SIZE
+from shenji.board import VOCAB_SIZE
 
 __all__ = ["ChessTransformer", "BoardEmbedding"]
 
@@ -28,24 +28,24 @@ class BoardEmbedding(nn.Module):
 
     def __init__(self, d_model: int) -> None:
         super().__init__()
-        self.piece_embed = nn.Embedding(13, d_model)     # tokens 0–63  (0–12)
-        self.stm_embed = nn.Embedding(2, d_model)        # token  64     (0–1)
-        self.castling_embed = nn.Embedding(2, d_model)   # tokens 65–68  (0–1)
-        self.ep_embed = nn.Embedding(9, d_model)         # token  69     (0–8)
-        self.hm_embed = nn.Embedding(11, d_model)        # token  70     (0–10)
-        self.pos_embed = nn.Embedding(71, d_model)       # learnable positional
+        self.piece_embed = nn.Embedding(13, d_model)  # tokens 0–63  (0–12)
+        self.stm_embed = nn.Embedding(2, d_model)  # token  64     (0–1)
+        self.castling_embed = nn.Embedding(2, d_model)  # tokens 65–68  (0–1)
+        self.ep_embed = nn.Embedding(9, d_model)  # token  69     (0–8)
+        self.hm_embed = nn.Embedding(11, d_model)  # token  70     (0–10)
+        self.pos_embed = nn.Embedding(71, d_model)  # learnable positional
 
     def forward(self, x: Tensor) -> Tensor:  # x: (B, 71)
-        pieces = self.piece_embed(x[:, :64])             # (B, 64, d)
-        stm = self.stm_embed(x[:, 64:65])               # (B,  1, d)
-        castling = self.castling_embed(x[:, 65:69])      # (B,  4, d)
-        ep = self.ep_embed(x[:, 69:70])                  # (B,  1, d)
-        hm = self.hm_embed(x[:, 70:71])                  # (B,  1, d)
+        pieces = self.piece_embed(x[:, :64])  # (B, 64, d)
+        stm = self.stm_embed(x[:, 64:65])  # (B,  1, d)
+        castling = self.castling_embed(x[:, 65:69])  # (B,  4, d)
+        ep = self.ep_embed(x[:, 69:70])  # (B,  1, d)
+        hm = self.hm_embed(x[:, 70:71])  # (B,  1, d)
 
         tok_emb = torch.cat([pieces, stm, castling, ep, hm], dim=1)  # (B, 71, d)
 
         positions = torch.arange(71, device=x.device)
-        return tok_emb + self.pos_embed(positions)       # (B, 71, d)
+        return tok_emb + self.pos_embed(positions)  # (B, 71, d)
 
 
 class ChessTransformer(nn.Module):
@@ -81,7 +81,7 @@ class ChessTransformer(nn.Module):
             dropout=dropout,
             activation="gelu",
             batch_first=True,
-            norm_first=True,   # pre-norm for training stability
+            norm_first=True,  # pre-norm for training stability
         )
         self.encoder = nn.TransformerEncoder(
             encoder_layer,
@@ -101,11 +101,11 @@ class ChessTransformer(nn.Module):
             elif isinstance(module, nn.Embedding):
                 nn.init.trunc_normal_(module.weight, std=0.02)
 
-    def forward(self, x: Tensor) -> Tensor:   # x: (B, 71)
-        emb = self.embedding(x)               # (B, 71, d)
-        enc = self.encoder(emb)               # (B, 71, d)
-        sq = enc[:, :64]                      # (B, 64, d)  – square representations
-        logits = self.policy_head(sq)         # (B, 64, 73)
+    def forward(self, x: Tensor) -> Tensor:  # x: (B, 71)
+        emb = self.embedding(x)  # (B, 71, d)
+        enc = self.encoder(emb)  # (B, 71, d)
+        sq = enc[:, :64]  # (B, 64, d)  – square representations
+        logits = self.policy_head(sq)  # (B, 64, 73)
         return logits.reshape(x.size(0), -1)  # (B, 4672)
 
     def num_parameters(self) -> int:

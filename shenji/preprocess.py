@@ -25,21 +25,41 @@ import numpy as np
 import zstandard as zstd
 from tqdm import tqdm
 
-from .board import BoardEncoder, MoveCodec
+from shenji.board import BoardEncoder, MoveCodec
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Preprocess Lichess PGN → .npz shards")
-    p.add_argument("--pgn-archive", required=True, type=Path,
-                   help="Path to Lichess .pgn or .pgn.zst archive")
-    p.add_argument("--out-dir", required=True, type=Path,
-                   help="Directory to write shard_NNNN.npz files")
-    p.add_argument("--shard-size", type=int, default=1_000_000,
-                   help="Positions per shard (default: 1 000 000)")
-    p.add_argument("--max-games", type=int, default=None,
-                   help="Stop after this many qualifying games (default: unlimited)")
-    p.add_argument("--min-elo", type=int, default=2000,
-                   help="Minimum Elo for both players (default: 2000)")
+    p.add_argument(
+        "--pgn-archive",
+        required=True,
+        type=Path,
+        help="Path to Lichess .pgn or .pgn.zst archive",
+    )
+    p.add_argument(
+        "--out-dir",
+        required=True,
+        type=Path,
+        help="Directory to write shard_NNNN.npz files",
+    )
+    p.add_argument(
+        "--shard-size",
+        type=int,
+        default=1_000_000,
+        help="Positions per shard (default: 1 000 000)",
+    )
+    p.add_argument(
+        "--max-games",
+        type=int,
+        default=None,
+        help="Stop after this many qualifying games (default: unlimited)",
+    )
+    p.add_argument(
+        "--min-elo",
+        type=int,
+        default=2000,
+        help="Minimum Elo for both players (default: 2000)",
+    )
     return p.parse_args()
 
 
@@ -112,7 +132,9 @@ def main() -> None:
                 xs, ys = [], []
 
         games_kept += 1
-        pbar.set_postfix(kept=games_kept, positions=len(xs) + shard_no * args.shard_size)
+        pbar.set_postfix(
+            kept=games_kept, positions=len(xs) + shard_no * args.shard_size
+        )
 
         if args.max_games and games_kept >= args.max_games:
             break

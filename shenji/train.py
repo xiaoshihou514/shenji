@@ -24,9 +24,9 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
 
-from .config import TrainConfig
-from .dataset import MultiShard
-from .model import ChessTransformer
+from shenji.config import TrainConfig
+from shenji.dataset import MultiShard
+from shenji.model import ChessTransformer
 
 
 def _now() -> str:

@@ -27,8 +27,8 @@ import chess
 import chess.svg
 import torch
 
-from .board import BoardEncoder, MoveCodec
-from .model import ChessTransformer
+from shenji.board import BoardEncoder, MoveCodec
+from shenji.model import ChessTransformer
 
 
 def _detect_renderer() -> str | None:
@@ -40,7 +40,9 @@ def _detect_renderer() -> str | None:
     return None
 
 
-def _render_board(board: chess.Board, arrow: chess.svg.Arrow | None, renderer: str | None) -> None:
+def _render_board(
+    board: chess.Board, arrow: chess.svg.Arrow | None, renderer: str | None
+) -> None:
     arrows = [arrow] if arrow else []
     svg_text = chess.svg.board(board, arrows=arrows, size=400)
     Path("board.svg").write_text(svg_text)
@@ -60,11 +62,11 @@ def _pick_move(
     topk: int,
 ) -> chess.Move:
     """Return the model's chosen move, masking illegal moves."""
-    x = BoardEncoder.encode(board).unsqueeze(0).to(device)           # (1, 71)
-    mask = MoveCodec.legal_mask(board).to(device)                    # (4672,)
+    x = BoardEncoder.encode(board).unsqueeze(0).to(device)  # (1, 71)
+    mask = MoveCodec.legal_mask(board).to(device)  # (4672,)
 
     with torch.no_grad():
-        logits = model(x).squeeze(0)                                  # (4672,)
+        logits = model(x).squeeze(0)  # (4672,)
 
     logits[~mask] = -torch.inf
 
@@ -81,12 +83,18 @@ def _pick_move(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Play chess against ChessTransformer")
-    parser.add_argument("--checkpoint", required=True, type=Path,
-                        help="Path to a .pt checkpoint file")
-    parser.add_argument("--topk", type=int, default=1,
-                        help="Greedy (1) or top-k sampling (default: 1)")
-    parser.add_argument("--play-as", choices=["white", "black"], default="white",
-                        help="Human plays as white or black (default: white)")
+    parser.add_argument(
+        "--checkpoint", required=True, type=Path, help="Path to a .pt checkpoint file"
+    )
+    parser.add_argument(
+        "--topk", type=int, default=1, help="Greedy (1) or top-k sampling (default: 1)"
+    )
+    parser.add_argument(
+        "--play-as",
+        choices=["white", "black"],
+        default="white",
+        help="Human plays as white or black (default: white)",
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -104,11 +112,15 @@ def main() -> None:
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
     print(f"Loaded checkpoint: {args.checkpoint}")
-    print(f"You play as {'White' if args.play_as == 'white' else 'Black'}.  Type 'quit' to exit.\n")
+    print(
+        f"You play as {'White' if args.play_as == 'white' else 'Black'}.  Type 'quit' to exit.\n"
+    )
 
     renderer = _detect_renderer()
     if renderer is None:
-        print("Note: no image renderer detected (kitty / wezterm). Falling back to ASCII.\n")
+        print(
+            "Note: no image renderer detected (kitty / wezterm). Falling back to ASCII.\n"
+        )
 
     human_color = chess.WHITE if args.play_as == "white" else chess.BLACK
     board = chess.Board()

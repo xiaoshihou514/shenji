@@ -16,20 +16,24 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from .config import TrainConfig
-from .dataset import MultiShard
-from .model import ChessTransformer
+from shenji.config import TrainConfig
+from shenji.dataset import MultiShard
+from shenji.model import ChessTransformer
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate a ChessTransformer checkpoint")
+    parser = argparse.ArgumentParser(
+        description="Evaluate a ChessTransformer checkpoint"
+    )
     parser.add_argument("--config", required=True)
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--data", required=True, type=Path)
     parser.add_argument("--topk", type=int, default=5)
     parser.add_argument(
-        "--max-samples", type=int, default=None,
-        help="Cap evaluation at this many positions (default: full dataset)"
+        "--max-samples",
+        type=int,
+        default=None,
+        help="Cap evaluation at this many positions (default: full dataset)",
     )
     args = parser.parse_args()
 
@@ -71,7 +75,7 @@ def main() -> None:
             with torch.amp.autocast(device_type=device.type, dtype=torch.float16):
                 logits = model(x)
 
-            topk_preds = logits.topk(args.topk, dim=1).indices   # (B, k)
+            topk_preds = logits.topk(args.topk, dim=1).indices  # (B, k)
             top1_correct += (topk_preds[:, 0] == y).sum().item()
             topk_correct += (topk_preds == y.unsqueeze(1)).any(dim=1).sum().item()
             total += y.size(0)
