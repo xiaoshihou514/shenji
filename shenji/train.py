@@ -100,7 +100,7 @@ def main() -> None:
     print(f"{_now()} device={device}")
 
     # ── data ──────────────────────────────────────────────────────────────────
-    ds = MultiShard(cfg.data_dir, cfg.shard_pattern)
+    ds = MultiShard(cfg.data_dir, cfg.shard_pattern, cfg.max_shards)
     loader = DataLoader(
         ds,
         batch_size=cfg.batch_size,

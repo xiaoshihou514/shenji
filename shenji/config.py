@@ -39,7 +39,8 @@ class TrainConfig:
     eval_every: int          # eval every N optimiser steps
     save_dir: Path
 
-    # ── optional resume ───────────────────────────────────────────────────────
+    # ── optional ──────────────────────────────────────────────────────────────
+    max_shards: int | None = None  # if set, only the first N shards are loaded
     resume: Path | None = None
 
     @staticmethod
@@ -54,4 +55,5 @@ class TrainConfig:
             raw["resume"] = Path(raw["resume"]).expanduser()
         else:
             raw.pop("resume", None)
+        raw.setdefault("max_shards", None)
         return TrainConfig(**raw)

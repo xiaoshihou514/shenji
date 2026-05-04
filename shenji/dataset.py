@@ -18,9 +18,12 @@ from torch.utils.data import Dataset
 __all__ = ["NPZShard", "MultiShard", "shard_paths"]
 
 
-def shard_paths(data_dir: Path, pattern: str) -> list[Path]:
-    """Return shard paths sorted deterministically."""
-    return sorted(data_dir.glob(pattern))
+def shard_paths(data_dir: Path, pattern: str, max_shards: int | None = None) -> list[Path]:
+    """Return shard paths sorted deterministically, optionally capped at *max_shards*."""
+    paths = sorted(data_dir.glob(pattern))
+    if max_shards is not None:
+        paths = paths[:max_shards]
+    return paths
 
 
 class NPZShard(Dataset):
@@ -49,8 +52,8 @@ class MultiShard(Dataset):
     shard with O(log S) binary search, where S = number of shards.
     """
 
-    def __init__(self, data_dir: Path, pattern: str) -> None:
-        paths = shard_paths(data_dir, pattern)
+    def __init__(self, data_dir: Path, pattern: str, max_shards: int | None = None) -> None:
+        paths = shard_paths(data_dir, pattern, max_shards)
         if not paths:
             raise FileNotFoundError(
                 f"No shards matching {pattern!r} found in {data_dir}"
