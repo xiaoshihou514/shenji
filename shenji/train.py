@@ -101,6 +101,8 @@ def main() -> None:
 
     # ── data ──────────────────────────────────────────────────────────────────
     ds = MultiShard(cfg.data_dir, cfg.shard_pattern, cfg.max_shards)
+
+    # Training Loader
     loader = DataLoader(
         ds,
         batch_size=cfg.batch_size,
@@ -108,6 +110,16 @@ def main() -> None:
         num_workers=cfg.num_workers,
         pin_memory=device.type == "cuda",
         drop_last=True,
+        persistent_workers=cfg.num_workers > 0,
+    )
+
+    val_loader = DataLoader(
+        ds,
+        batch_size=cfg.batch_size,
+        shuffle=True, # Or False if you want deterministic eval
+        num_workers=cfg.num_workers,
+        pin_memory=device.type == "cuda",
+        drop_last=False,
         persistent_workers=cfg.num_workers > 0,
     )
     steps_per_epoch = len(loader) // cfg.grad_accum
@@ -197,7 +209,8 @@ def main() -> None:
                     )
 
                 if global_step % cfg.eval_every == 0:
-                    eval_loss, eval_acc = _quick_eval(model, loader, criterion, device)
+                    # Use val_loader instead of loader
+                    eval_loss, eval_acc = _quick_eval(model, val_loader, criterion, device)
                     writer.add_scalar("eval/loss", eval_loss, global_step)
                     writer.add_scalar("eval/acc", eval_acc, global_step)
                     print(
