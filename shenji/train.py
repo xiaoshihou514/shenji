@@ -272,15 +272,9 @@ def main() -> None:
                 grad_norm = nn.utils.clip_grad_norm_(model.parameters(), cfg.clip_grad_norm)
 
                 # ── NaN/Inf gradient guard ────────────────────────────────────
-                # Also skip finite-but-extreme grad norms: even after clipping to
-                # cfg.clip_grad_norm the update direction is severely distorted
-                # (all gradients scaled down by 1/grad_norm instead of 1/clip).
                 grad_norm_val = grad_norm.item() if torch.is_tensor(grad_norm) else float(grad_norm)
-                bad_grad = not torch.isfinite(grad_norm) or (
-                    cfg.grad_norm_skip is not None and grad_norm_val > cfg.grad_norm_skip
-                )
-                if bad_grad:
-                    print(f"\n⚠  Bad grad_norm ({grad_norm_val:.1f}) at epoch {epoch} "
+                if not torch.isfinite(grad_norm):
+                    print(f"\n⚠  Non-finite grad_norm at epoch {epoch} "
                           f"step {global_step}, skipping update.")
                     opt.zero_grad(set_to_none=True)
                     scaler.update()  # must call to keep scaler state consistent
