@@ -4,7 +4,7 @@
 data_dir: ./data
 shard_pattern: "shard_*.npz"
 num_workers: 8
-# max_shards: 10   # uncomment to limit total shards considered
+max_shards: 10   # uncomment to limit total shards considered
 val_shards: 1      # last N shards reserved for validation (not used in training)
 
 ##############################

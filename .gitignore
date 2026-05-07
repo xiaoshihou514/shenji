@@ -2,5 +2,5 @@
 inference/target/
 data
 __pycache__
-checkpoints
+checkpoints*
 logs
