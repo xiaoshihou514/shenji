@@ -1,0 +1,73 @@
+##############################
+# RL bootstrap
+##############################
+sl_checkpoint: ./checkpoints/best.pt
+sl_data_dir: ./data
+save_dir: ./rl_checkpoints
+sl_shard_pattern: "shard_*.npz"
+sl_anchor_shards: 2
+sl_val_shards: 1
+# sl_max_shards: 10
+num_workers: 4
+
+##############################
+# Model fallback
+# Real shape is loaded from checkpoint["cfg"]
+##############################
+d_model: 768
+nhead: 12
+num_layers: 12
+dim_feedforward: 3072
+dropout: 0.0
+
+##############################
+# RL loop
+##############################
+iterations: 10
+rl_epochs: 2
+selfplay_games_per_iter: 500
+selfplay_batch_size: 128
+selfplay_max_moves: 300
+gamma: 0.99
+repetition_penalty: 0.0
+temperature_open: 1.0
+temperature_mid: 0.3
+temperature_switch_ply: 10
+dirichlet_alpha: null
+dirichlet_eps: 0.0
+
+##############################
+# Opponent mix
+##############################
+opponent_selfplay_frac: 0.6
+opponent_history_frac: 0.2
+opponent_engine_frac: 0.2
+history_pool_size: 5
+engine_path: null
+engine_depth: 5
+
+##############################
+# Optimisation
+##############################
+batch_size: 512
+grad_accum: 2
+lr: 3.0e-5
+min_lr: 1.0e-6
+weight_decay: 1.0e-4
+betas: [0.9, 0.95]
+clip_grad_norm: 1.0
+warmup_steps: 500
+lambda_bc_start: 0.3
+lambda_bc_end: 0.05
+lambda_bc_decay_steps: 10000
+entropy_coeff: 0.01
+loss_spike_threshold: 20.0
+
+##############################
+# Logging / checkpointing
+##############################
+log_every: 20
+eval_every_iter: 1
+eval_games: 20
+seed: 42
+# resume: ./rl_checkpoints/iter_003.pt

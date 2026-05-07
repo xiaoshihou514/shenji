@@ -2,7 +2,7 @@
 preprocess.py – stream-parse Lichess PGN dumps into sharded .npz archives.
 
 Usage:
-    python -m shenji.preprocess \\
+    uv run shenji/preprocess.py \\
         --pgn-archive /data/lichess_db_standard_rated_2025-05.pgn.zst \\
         --out-dir ./data \\
         --shard-size 1_000_000 \\

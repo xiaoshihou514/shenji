@@ -2,7 +2,7 @@
 train.py – supervised training of ChessTransformer on pre-processed shards.
 
 Usage:
-    python -m shenji.train --config shenji/config.yaml
+    uv run shenji/train.py --config shenji/config.yaml
 
 Features:
     • fp16/bf16 mixed-precision via torch.amp (bf16 used automatically if supported)

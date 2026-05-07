@@ -2,7 +2,7 @@
 play.py – interactive terminal chess against a trained ChessTransformer.
 
 Usage:
-    python -m shenji.play \\
+    uv run shenji/play.py \\
         --checkpoint checkpoints/epoch_020_step_0123456.pt \\
         [--topk 1]          # 1 = greedy, >1 = sample from top-k
 

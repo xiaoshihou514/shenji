@@ -2,7 +2,7 @@
 evaluate.py – compute top-1 / top-5 accuracy for a trained checkpoint.
 
 Usage:
-    python -m shenji.evaluate \\
+    uv run shenji/evaluate.py \\
         --config shenji/config.yaml \\
         --checkpoint checkpoints/epoch_020_step_0123456.pt \\
         --data ./data \\
