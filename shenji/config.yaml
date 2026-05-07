@@ -37,6 +37,15 @@ epochs: 20
 label_smoothing: 0.1    # reduces overconfident predictions; helps generalisation
 
 ##############################
+# Stability guards
+##############################
+# Skip batch if raw loss exceeds this (bad-data spikes that are finite but huge)
+loss_spike_threshold: 20.0
+# Skip optimiser step if pre-clip grad norm exceeds this (extreme grads distort
+# the update direction even after clipping)
+grad_norm_skip: 50.0
+
+##############################
 # Logging / checkpointing
 ##############################
 log_every: 50           # optimiser steps

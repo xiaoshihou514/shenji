@@ -44,6 +44,12 @@ class TrainConfig:
     max_shards: int | None = None  # total shards to consider (None = all)
     val_shards: int = 1            # last N shards held out for validation
     resume: Path | None = None
+    # Skip a batch if loss exceeds this value (catches bad-data spikes that are
+    # finite but pathologically large; None = disabled).
+    loss_spike_threshold: float | None = 20.0
+    # Skip an optimiser step if the pre-clip grad norm exceeds this value
+    # (finite-but-extreme gradients still distort training even after clipping).
+    grad_norm_skip: float | None = 50.0
 
     @staticmethod
     def load(cfg_path: str | Path) -> "TrainConfig":
@@ -60,4 +66,6 @@ class TrainConfig:
         raw.setdefault("max_shards", None)
         raw.setdefault("val_shards", 1)
         raw.setdefault("label_smoothing", 0.1)
+        raw.setdefault("loss_spike_threshold", 20.0)
+        raw.setdefault("grad_norm_skip", 50.0)
         return TrainConfig(**raw)
