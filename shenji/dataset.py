@@ -50,6 +50,10 @@ class MultiShard(Dataset):
 
     Uses a prefix-sum table to route each global index to the correct
     shard with O(log S) binary search, where S = number of shards.
+
+    Prefer ``MultiShard.from_paths(paths)`` when you already have a list of
+    paths (e.g. after a train/val split). Use the constructor for the common
+    case of loading all shards from a directory.
     """
 
     def __init__(self, data_dir: Path, pattern: str, max_shards: int | None = None) -> None:
@@ -58,6 +62,18 @@ class MultiShard(Dataset):
             raise FileNotFoundError(
                 f"No shards matching {pattern!r} found in {data_dir}"
             )
+        self._load(paths)
+
+    @classmethod
+    def from_paths(cls, paths: list[Path]) -> "MultiShard":
+        """Construct directly from an explicit list of shard paths."""
+        if not paths:
+            raise ValueError("paths list must not be empty")
+        obj = object.__new__(cls)
+        obj._load(paths)
+        return obj
+
+    def _load(self, paths: list[Path]) -> None:
         self.shards = [NPZShard(p) for p in paths]
         lengths = [len(s) for s in self.shards]
         self.cum_lens = np.add.accumulate(lengths)

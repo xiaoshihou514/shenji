@@ -60,6 +60,7 @@ def _pick_move(
     board: chess.Board,
     device: torch.device,
     topk: int,
+    temperature: float,
 ) -> chess.Move:
     """Return the model's chosen move, masking illegal moves."""
     x = BoardEncoder.encode(board).unsqueeze(0).to(device)  # (1, 71)
@@ -69,6 +70,9 @@ def _pick_move(
         logits = model(x).squeeze(0)  # (4672,)
 
     logits[~mask] = -torch.inf
+
+    if temperature != 1.0:
+        logits = logits / temperature
 
     if topk == 1:
         idx = int(logits.argmax())
@@ -88,6 +92,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--topk", type=int, default=1, help="Greedy (1) or top-k sampling (default: 1)"
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="Softmax temperature (default: 1.0). <1 = sharper/stronger, >1 = more random",
     )
     parser.add_argument(
         "--play-as",
@@ -149,7 +159,7 @@ def main() -> None:
             )
         else:
             # ── AI move ───────────────────────────────────────────────────────
-            move = _pick_move(model, board, device, args.topk)
+            move = _pick_move(model, board, device, args.topk, args.temperature)
             board.push(move)
             print(f"AI plays: {move.uci()}")
             _render_board(

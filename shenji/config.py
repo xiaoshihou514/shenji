@@ -33,6 +33,7 @@ class TrainConfig:
     batch_size: int
     grad_accum: int          # gradient accumulation steps
     epochs: int
+    label_smoothing: float   # cross-entropy label smoothing coefficient (0 = off)
 
     # ── logging / checkpointing ───────────────────────────────────────────────
     log_every: int           # log every N optimiser steps
@@ -40,7 +41,8 @@ class TrainConfig:
     save_dir: Path
 
     # ── optional ──────────────────────────────────────────────────────────────
-    max_shards: int | None = None  # if set, only the first N shards are loaded
+    max_shards: int | None = None  # total shards to consider (None = all)
+    val_shards: int = 1            # last N shards held out for validation
     resume: Path | None = None
 
     @staticmethod
@@ -56,4 +58,6 @@ class TrainConfig:
         else:
             raw.pop("resume", None)
         raw.setdefault("max_shards", None)
+        raw.setdefault("val_shards", 1)
+        raw.setdefault("label_smoothing", 0.1)
         return TrainConfig(**raw)

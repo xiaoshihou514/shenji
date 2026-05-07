@@ -93,13 +93,16 @@ class ChessTransformer(nn.Module):
         self._init_weights()
 
     def _init_weights(self) -> None:
+        # Scale std by depth: deeper networks need smaller initial weights to
+        # avoid activation variance growing with layer count (GPT-2 / Deepseek recipe).
+        std = 0.02 / (2 * len(self.encoder.layers)) ** 0.5
         for module in self.modules():
             if isinstance(module, nn.Linear):
-                nn.init.trunc_normal_(module.weight, std=0.02)
+                nn.init.trunc_normal_(module.weight, std=std)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
             elif isinstance(module, nn.Embedding):
-                nn.init.trunc_normal_(module.weight, std=0.02)
+                nn.init.trunc_normal_(module.weight, std=std)
 
     def forward(self, x: Tensor) -> Tensor:  # x: (B, 71)
         emb = self.embedding(x)  # (B, 71, d)

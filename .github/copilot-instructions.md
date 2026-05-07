@@ -46,7 +46,8 @@ python -m shenji.evaluate \
     --data ./data
 
 # Play interactively against the model
-python -m shenji.play --checkpoint checkpoints/epoch_020_step_0123456.pt
+python -m shenji.play --checkpoint checkpoints/epoch_020_step_0123456.pt \
+    [--topk 5] [--temperature 0.8]   # temperature <1 sharpens, >1 randomizes
 
 # Lint / format
 black shenji/
@@ -91,10 +92,16 @@ Tables are precomputed at import time. Key methods:
 `MultiShard` concatenates sharded `.npz` files via prefix-sum + binary search. Shards are memory-mapped (`mmap_mode="r"`). Each shard: `x: uint8 (N, 71)`, `y: int16 (N,)` (move index 0–4671).
 
 ### Training (`train.py`)
-- fp16 AMP (`torch.amp.autocast`), gradient scaler
+- fp16/bf16 AMP (`torch.amp.autocast`); bf16 used automatically if `torch.cuda.is_bf16_supported()` (e.g. Ampere+ GPUs), otherwise fp16
+- GradScaler `init_scale=2**14` (lower than default to reduce fp16 overflow risk)
+- **NaN/Inf guard**: non-finite loss → batch skipped; non-finite grad norm → optimizer step skipped; count logged per epoch
+- `grad_norm` and `scaler_scale` logged to TensorBoard every `log_every` steps (watch for early signs of instability)
 - AdamW, cosine LR decay with linear warmup, gradient clipping
 - Gradient accumulation (`grad_accum` steps, effective batch = `batch_size × grad_accum`)
+- **Train/val split**: last `val_shards` (default 1) shards reserved for validation; training uses the rest
+- **best.pt**: saved whenever validation accuracy improves during `eval_every` checks
 - Checkpoints: `epoch_NNN_step_NNNNNNN.pt` — contain `model_state`, `opt_state`, `scaler_state`, `cfg` dict
+- Label smoothing: `CrossEntropyLoss(label_smoothing=cfg.label_smoothing)` (default 0.1)
 
 ## Key Conventions
 
