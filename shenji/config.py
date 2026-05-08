@@ -41,9 +41,8 @@ class TrainConfig:
     save_dir: Path
 
     # ── optional ──────────────────────────────────────────────────────────────
-    max_shards: int | None = None  # total shards to consider (None = all)
-    test_shards: int = 1           # middle held-out shards for standalone evaluation
-    val_shards: int = 1            # final shards reserved for in-training validation
+    max_shards: int | None = None  # first N shards used by the training pipeline
+    val_shards: int = 1            # tail shards inside the training window, used for validation
     resume: Path | None = None
     # Skip a batch if loss exceeds this value (catches bad-data spikes that are
     # finite but pathologically large; None = disabled).
@@ -61,9 +60,9 @@ class TrainConfig:
             raw["resume"] = Path(raw["resume"]).expanduser()
         else:
             raw.pop("resume", None)
+        raw.pop("test_shards", None)  # backward compatibility with older configs
         raw.setdefault("max_shards", None)
         raw.setdefault("val_shards", 1)
-        raw.setdefault("test_shards", 1)
         raw.setdefault("label_smoothing", 0.1)
         raw.setdefault("loss_spike_threshold", 20.0)
         return TrainConfig(**raw)

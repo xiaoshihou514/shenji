@@ -31,24 +31,24 @@ def _amp_dtype(device: torch.device) -> torch.dtype:
 
 
 def _select_test_paths(cfg: TrainConfig, data_dir: Path, shard_count: int | None) -> list[Path]:
-    paths = shard_paths(data_dir, cfg.shard_pattern, cfg.max_shards)
+    paths = shard_paths(data_dir, cfg.shard_pattern)
     if not paths:
         raise FileNotFoundError(f"No shards matching {cfg.shard_pattern!r} found in {data_dir}")
-    if len(paths) <= cfg.val_shards + cfg.test_shards:
+    train_pool_count = cfg.max_shards if cfg.max_shards is not None else len(paths)
+    if train_pool_count >= len(paths):
         raise ValueError(
-            f"Need more than val_shards + test_shards = {cfg.val_shards + cfg.test_shards} shards "
-            f"to keep train/val/test separate, got {len(paths)}."
+            f"No standalone eval shards available: max_shards={train_pool_count} already covers all "
+            f"{len(paths)} shards. Reduce max_shards or add more data."
         )
 
-    test_start = len(paths) - cfg.val_shards - cfg.test_shards
-    test_end = len(paths) - cfg.val_shards
-    test_paths = paths[test_start:test_end]
+    test_paths = paths[train_pool_count:]
     use_count = shard_count if shard_count is not None else len(test_paths)
     if use_count <= 0:
         raise ValueError("--shards must be a positive integer")
     if use_count > len(test_paths):
         raise ValueError(
-            f"--shards={use_count} exceeds available held-out test shards ({len(test_paths)})"
+            f"--shards={use_count} exceeds available standalone eval shards ({len(test_paths)}), "
+            f"which are the shards outside the first max_shards={train_pool_count} training shards."
         )
     return test_paths[:use_count]
 
@@ -69,14 +69,14 @@ def main() -> None:
         "--shards",
         type=int,
         default=None,
-        help="How many held-out middle test shards to use (default: all configured test shards)",
+        help="How many standalone eval shards to use outside the training window (default: all)",
     )
     parser.add_argument("--topk", type=int, default=5)
     parser.add_argument(
         "--max-samples",
         type=int,
         default=None,
-        help="Cap evaluation at this many positions (default: full selected middle test shards)",
+        help="Cap evaluation at this many positions (default: full selected standalone eval shards)",
     )
     args = parser.parse_args()
 

@@ -157,21 +157,20 @@ def main() -> None:
     print(f"{_now()} device={device}  amp_dtype={amp_dtype}")
 
     # ── data split ────────────────────────────────────────────────────────────
-    all_paths = shard_paths(cfg.data_dir, cfg.shard_pattern, cfg.max_shards)
-    held_out = cfg.val_shards + cfg.test_shards
-    if len(all_paths) <= held_out:
+    all_paths = shard_paths(cfg.data_dir, cfg.shard_pattern)
+    train_pool = all_paths[: cfg.max_shards] if cfg.max_shards is not None else all_paths
+    if len(train_pool) <= cfg.val_shards:
         raise ValueError(
-            f"Only {len(all_paths)} shard(s) found but val_shards + test_shards = {held_out}. "
-            "Reduce held-out shards or provide more data."
+            f"Only {len(train_pool)} shard(s) available in the training window but val_shards={cfg.val_shards}. "
+            "Reduce val_shards or increase max_shards / available data."
         )
-    train_cut = len(all_paths) - held_out
-    val_cut = len(all_paths) - cfg.val_shards
-    train_paths = all_paths[:train_cut]
-    test_paths = all_paths[train_cut:val_cut]
-    val_paths = all_paths[val_cut:]
+    train_cut = len(train_pool) - cfg.val_shards
+    train_paths = train_pool[:train_cut]
+    val_paths = train_pool[train_cut:]
+    eval_paths = all_paths[len(train_pool) :]
     print(
         f"{_now()} shards: {len(train_paths)} train + {len(val_paths)} val"
-        f" + {len(test_paths)} test  (pattern={cfg.shard_pattern!r})"
+        f" + {len(eval_paths)} standalone-eval  (pattern={cfg.shard_pattern!r})"
     )
 
     train_ds = MultiShard.from_paths(train_paths)
