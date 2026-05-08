@@ -6,3 +6,4 @@ checkpoints*
 logs
 tensorboard
 *.md
+!NOTREADME.md
