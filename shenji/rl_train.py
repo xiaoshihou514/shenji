@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import warnings
 from datetime import datetime
 from pathlib import Path
 
@@ -74,6 +75,7 @@ def _load_rl_checkpoint(
     path: Path,
     model: ChessTransformer,
     opt: AdamW,
+    scheduler: SequentialLR,
     scaler: torch.amp.GradScaler,
     device: torch.device,
     amp_dtype: torch.dtype,
@@ -85,6 +87,13 @@ def _load_rl_checkpoint(
     cur_dtype_name = "bfloat16" if amp_dtype == torch.bfloat16 else "float16"
     if ckpt_dtype_name == cur_dtype_name:
         scaler.load_state_dict(state["scaler_state"])
+    if "scheduler_state" in state:
+        scheduler.load_state_dict(state["scheduler_state"])
+    else:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            for _ in range(state["global_step"]):
+                scheduler.step()
     print(
         f"Resumed RL from {path} (iter {state['iteration']}, step {state['global_step']})"
     )
@@ -106,6 +115,7 @@ def _model_cfg(model: ChessTransformer) -> dict[str, int | float | bool]:
 def _build_checkpoint_state(
     model: ChessTransformer,
     opt: AdamW,
+    scheduler: SequentialLR,
     scaler: torch.amp.GradScaler,
     iteration: int,
     global_step: int,
@@ -119,6 +129,7 @@ def _build_checkpoint_state(
         "amp_dtype": "bfloat16" if amp_dtype == torch.bfloat16 else "float16",
         "model_state": model.state_dict(),
         "opt_state": opt.state_dict(),
+        "scheduler_state": scheduler.state_dict(),
         "scaler_state": scaler.state_dict(),
         "cfg": _model_cfg(model),
     }
@@ -239,19 +250,6 @@ def main() -> None:
         init_scale=2**14,
         enabled=(amp_dtype == torch.float16),
     )
-
-    start_iter = 1
-    global_step = 0
-    best_eval_score = -1.0
-    if cfg.resume:
-        start_iter, global_step, best_eval_score = _load_rl_checkpoint(
-            cfg.resume, model, opt, scaler, device, amp_dtype
-        )
-        start_iter += 1
-    else:
-        _load_model_only(cfg.sl_checkpoint, model, device)
-        print(f"Loaded SL weights from {cfg.sl_checkpoint} into a fresh RL optimiser.")
-
     total_steps_est = max(
         cfg.iterations
         * cfg.rl_epochs
@@ -260,8 +258,18 @@ def main() -> None:
         1,
     )
     scheduler = _build_scheduler(opt, cfg.warmup_steps, total_steps_est, cfg.min_lr)
-    for _ in range(global_step):
-        scheduler.step()
+
+    start_iter = 1
+    global_step = 0
+    best_eval_score = -1.0
+    if cfg.resume:
+        start_iter, global_step, best_eval_score = _load_rl_checkpoint(
+            cfg.resume, model, opt, scheduler, scaler, device, amp_dtype
+        )
+        start_iter += 1
+    else:
+        _load_model_only(cfg.sl_checkpoint, model, device)
+        print(f"Loaded SL weights from {cfg.sl_checkpoint} into a fresh RL optimiser.")
 
     shard_list = shard_paths(cfg.sl_data_dir, cfg.sl_shard_pattern, cfg.sl_max_shards)
     if not shard_list:
@@ -536,7 +544,7 @@ def main() -> None:
         ckpt_path = cfg.save_dir / f"iter_{iteration:03d}.pt"
         _save_checkpoint(
             _build_checkpoint_state(
-                model, opt, scaler, iteration, global_step, best_eval_score, amp_dtype
+                model, opt, scheduler, scaler, iteration, global_step, best_eval_score, amp_dtype
             ),
             ckpt_path,
         )
@@ -544,7 +552,7 @@ def main() -> None:
             best_eval_score = eval_score
             _save_checkpoint(
                 _build_checkpoint_state(
-                    model, opt, scaler, iteration, global_step, best_eval_score, amp_dtype
+                    model, opt, scheduler, scaler, iteration, global_step, best_eval_score, amp_dtype
                 ),
                 cfg.save_dir / "best.pt",
             )

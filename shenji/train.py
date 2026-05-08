@@ -16,6 +16,7 @@ Features:
 """
 
 import argparse
+import warnings
 from datetime import datetime
 from pathlib import Path
 
@@ -54,6 +55,7 @@ def _load_checkpoint(
     path: Path,
     model: ChessTransformer,
     opt: AdamW,
+    scheduler: SequentialLR,
     scaler: torch.amp.GradScaler,
     device: torch.device,
     amp_dtype: torch.dtype,
@@ -78,6 +80,14 @@ def _load_checkpoint(
             "scaler state not restored (will re-initialise)."
         )
 
+    if "scheduler_state" in state:
+        scheduler.load_state_dict(state["scheduler_state"])
+    else:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            for _ in range(state["global_step"]):
+                scheduler.step()
+
     print(f"Resumed from {path}  (epoch {state['epoch']}, step {state['global_step']})")
     return state["epoch"], state["global_step"]
 
@@ -92,13 +102,14 @@ def _build_scheduler(
     return SequentialLR(opt, schedulers=[warmup, cosine], milestones=[warmup_steps])
 
 
-def _build_checkpoint_state(model, opt, scaler, epoch, global_step, cfg, amp_dtype) -> dict:
+def _build_checkpoint_state(model, opt, scheduler, scaler, epoch, global_step, cfg, amp_dtype) -> dict:
     return {
         "epoch": epoch,
         "global_step": global_step,
         "amp_dtype": "bfloat16" if amp_dtype == torch.bfloat16 else "float16",
         "model_state": model.state_dict(),
         "opt_state": opt.state_dict(),
+        "scheduler_state": scheduler.state_dict(),
         "scaler_state": scaler.state_dict(),
         "cfg": {
             "d_model": cfg.d_model,
@@ -147,16 +158,20 @@ def main() -> None:
 
     # ── data split ────────────────────────────────────────────────────────────
     all_paths = shard_paths(cfg.data_dir, cfg.shard_pattern, cfg.max_shards)
-    if len(all_paths) <= cfg.val_shards:
+    held_out = cfg.val_shards + cfg.test_shards
+    if len(all_paths) <= held_out:
         raise ValueError(
-            f"Only {len(all_paths)} shard(s) found but val_shards={cfg.val_shards}. "
-            "Reduce val_shards or provide more data."
+            f"Only {len(all_paths)} shard(s) found but val_shards + test_shards = {held_out}. "
+            "Reduce held-out shards or provide more data."
         )
-    train_paths = all_paths[: len(all_paths) - cfg.val_shards]
-    val_paths = all_paths[len(all_paths) - cfg.val_shards :]
+    train_cut = len(all_paths) - held_out
+    val_cut = len(all_paths) - cfg.test_shards
+    train_paths = all_paths[:train_cut]
+    val_paths = all_paths[train_cut:val_cut]
+    test_paths = all_paths[val_cut:]
     print(
         f"{_now()} shards: {len(train_paths)} train + {len(val_paths)} val"
-        f"  (pattern={cfg.shard_pattern!r})"
+        f" + {len(test_paths)} test  (pattern={cfg.shard_pattern!r})"
     )
 
     train_ds = MultiShard.from_paths(train_paths)
@@ -222,11 +237,8 @@ def main() -> None:
     best_val_acc = 0.0
     if cfg.resume:
         start_epoch, global_step = _load_checkpoint(
-            cfg.resume, model, opt, scaler, device, amp_dtype
+            cfg.resume, model, opt, scheduler, scaler, device, amp_dtype
         )
-        # Fast-forward the scheduler to the resumed step
-        for _ in range(global_step):
-            scheduler.step()
         start_epoch += 1
 
     # ── training loop ─────────────────────────────────────────────────────────
@@ -319,7 +331,9 @@ def main() -> None:
                         best_val_acc = eval_acc
                         best_path = cfg.save_dir / "best.pt"
                         _save_checkpoint(
-                            _build_checkpoint_state(model, opt, scaler, epoch, global_step, cfg, amp_dtype),
+                            _build_checkpoint_state(
+                                model, opt, scheduler, scaler, epoch, global_step, cfg, amp_dtype
+                            ),
                             best_path,
                         )
                         print(f"{_now()} ★ new best val_acc={best_val_acc:.4f}  → {best_path}")
@@ -329,7 +343,9 @@ def main() -> None:
         # ── save checkpoint at end of every epoch ─────────────────────────────
         ckpt_path = cfg.save_dir / f"epoch_{epoch:03d}_step_{global_step:07d}.pt"
         _save_checkpoint(
-            _build_checkpoint_state(model, opt, scaler, epoch, global_step, cfg, amp_dtype),
+            _build_checkpoint_state(
+                model, opt, scheduler, scaler, epoch, global_step, cfg, amp_dtype
+            ),
             ckpt_path,
         )
         if skipped:
