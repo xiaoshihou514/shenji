@@ -40,7 +40,9 @@ def _select_test_paths(cfg: TrainConfig, data_dir: Path, shard_count: int | None
             f"to keep train/val/test separate, got {len(paths)}."
         )
 
-    test_paths = paths[-cfg.test_shards :]
+    test_start = len(paths) - cfg.val_shards - cfg.test_shards
+    test_end = len(paths) - cfg.val_shards
+    test_paths = paths[test_start:test_end]
     use_count = shard_count if shard_count is not None else len(test_paths)
     if use_count <= 0:
         raise ValueError("--shards must be a positive integer")
@@ -67,14 +69,14 @@ def main() -> None:
         "--shards",
         type=int,
         default=None,
-        help="How many held-out test shards to use (default: all configured test shards)",
+        help="How many held-out middle test shards to use (default: all configured test shards)",
     )
     parser.add_argument("--topk", type=int, default=5)
     parser.add_argument(
         "--max-samples",
         type=int,
         default=None,
-        help="Cap evaluation at this many positions (default: full selected test shards)",
+        help="Cap evaluation at this many positions (default: full selected middle test shards)",
     )
     args = parser.parse_args()
 
@@ -123,6 +125,10 @@ def main() -> None:
             topk_correct += (topk_preds == y.unsqueeze(1)).any(dim=1).sum().item()
             total += y.size(0)
             progress.update(min(y.size(0), max(target_total - progress.n, 0)))
+            progress.set_postfix(
+                top1=f"{top1_correct / total:.4f}",
+                topk=f"{topk_correct / total:.4f}",
+            )
 
     progress.close()
 

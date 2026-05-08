@@ -165,10 +165,10 @@ def main() -> None:
             "Reduce held-out shards or provide more data."
         )
     train_cut = len(all_paths) - held_out
-    val_cut = len(all_paths) - cfg.test_shards
+    val_cut = len(all_paths) - cfg.val_shards
     train_paths = all_paths[:train_cut]
-    val_paths = all_paths[train_cut:val_cut]
-    test_paths = all_paths[val_cut:]
+    test_paths = all_paths[train_cut:val_cut]
+    val_paths = all_paths[val_cut:]
     print(
         f"{_now()} shards: {len(train_paths)} train + {len(val_paths)} val"
         f" + {len(test_paths)} test  (pattern={cfg.shard_pattern!r})"

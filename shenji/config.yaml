@@ -6,7 +6,7 @@ shard_pattern: "shard_*.npz"
 num_workers: 8
 max_shards: 10   # uncomment to limit total shards considered
 val_shards: 1    # shards reserved for in-training validation
-test_shards: 1   # final shards reserved for standalone evaluate.py
+test_shards: 1   # middle held-out shards reserved for standalone evaluate.py
 
 ##############################
 # Model  (medium ~85M params)

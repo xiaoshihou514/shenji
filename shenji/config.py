@@ -42,8 +42,8 @@ class TrainConfig:
 
     # ── optional ──────────────────────────────────────────────────────────────
     max_shards: int | None = None  # total shards to consider (None = all)
-    val_shards: int = 1            # shards after train split, used during training
-    test_shards: int = 1           # final N shards reserved for standalone evaluation
+    test_shards: int = 1           # middle held-out shards for standalone evaluation
+    val_shards: int = 1            # final shards reserved for in-training validation
     resume: Path | None = None
     # Skip a batch if loss exceeds this value (catches bad-data spikes that are
     # finite but pathologically large; None = disabled).
