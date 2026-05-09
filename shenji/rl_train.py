@@ -1,5 +1,5 @@
 """
-rl_train.py – reinforce the supervised checkpoint with self-play and a BC anchor.
+rl_train.py – reinforce the supervised checkpoint with PPO and a BC anchor.
 
 Usage:
     uv run shenji/rl_train.py --config shenji/rl_config.yaml
@@ -13,6 +13,7 @@ supervised shards.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import random
 from datetime import datetime
@@ -88,7 +89,9 @@ def _restore_scheduler_fallback(scheduler: SequentialLR, global_step: int) -> No
     else:
         cosine_epoch = global_step - warmup_steps
         lr = eta_min + (
-            (base_lr - eta_min) * (1 + torch.cos(torch.tensor(torch.pi * cosine_epoch / t_max)).item()) / 2
+            (base_lr - eta_min)
+            * (1 + torch.cos(torch.tensor(torch.pi * cosine_epoch / t_max)).item())
+            / 2
         )
         warm["last_epoch"] = max(warmup_steps - 1, 0)
         warm["_step_count"] = max(warmup_steps, 1)
@@ -107,6 +110,11 @@ def _restore_scheduler_fallback(scheduler: SequentialLR, global_step: int) -> No
 def _load_model_only(checkpoint: Path, model: ChessTransformer, device: torch.device) -> None:
     state = torch.load(checkpoint, map_location=device, weights_only=False)
     model.load_state_dict(state["model_state"])
+
+
+def _maybe_empty_cache(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
 
 
 def _load_rl_checkpoint(
@@ -129,9 +137,7 @@ def _load_rl_checkpoint(
         scheduler.load_state_dict(state["scheduler_state"])
     else:
         _restore_scheduler_fallback(scheduler, state["global_step"])
-    print(
-        f"Resumed RL from {path} (iter {state['iteration']}, step {state['global_step']})"
-    )
+    print(f"Resumed RL from {path} (iter {state['iteration']}, step {state['global_step']})")
     return state["iteration"], state["global_step"], float(state.get("best_eval_score", -1.0))
 
 
@@ -170,7 +176,56 @@ def _build_checkpoint_state(
     }
 
 
-def _load_model_from_state(path: Path, device: torch.device, fallback: RLConfig) -> ChessTransformer:
+def _snapshot_state_bytes(
+    model: ChessTransformer,
+    opt: AdamW,
+    scheduler: SequentialLR,
+    scaler: torch.amp.GradScaler,
+    iteration: int,
+    global_step: int,
+    best_eval_score: float,
+    amp_dtype: torch.dtype,
+) -> bytes:
+    buffer = io.BytesIO()
+    torch.save(
+        _build_checkpoint_state(
+            model,
+            opt,
+            scheduler,
+            scaler,
+            iteration,
+            global_step,
+            best_eval_score,
+            amp_dtype,
+        ),
+        buffer,
+    )
+    return buffer.getvalue()
+
+
+def _restore_snapshot_bytes(
+    snapshot: bytes,
+    model: ChessTransformer,
+    opt: AdamW,
+    scheduler: SequentialLR,
+    scaler: torch.amp.GradScaler,
+    device: torch.device,
+    amp_dtype: torch.dtype,
+) -> tuple[int, int, float]:
+    state = torch.load(io.BytesIO(snapshot), map_location=device, weights_only=False)
+    model.load_state_dict(state["model_state"])
+    opt.load_state_dict(state["opt_state"])
+    scheduler.load_state_dict(state["scheduler_state"])
+    ckpt_dtype_name = state.get("amp_dtype", "float16")
+    cur_dtype_name = "bfloat16" if amp_dtype == torch.bfloat16 else "float16"
+    if ckpt_dtype_name == cur_dtype_name:
+        scaler.load_state_dict(state["scaler_state"])
+    return state["iteration"], state["global_step"], float(state.get("best_eval_score", -1.0))
+
+
+def _load_model_from_state(
+    path: Path, device: torch.device, fallback: RLConfig
+) -> ChessTransformer:
     state = torch.load(path, map_location=device, weights_only=False)
     saved_cfg = state.get("cfg", {})
     model = ChessTransformer(
@@ -218,7 +273,7 @@ def _legal_masks(fens: list[str], device: torch.device) -> torch.Tensor:
     return torch.stack(masks).to(device)
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def _sl_eval(
     model: ChessTransformer,
     loader: DataLoader,
@@ -242,6 +297,30 @@ def _sl_eval(
         total += y.size(0)
     model.train()
     return loss_sum / max(total, 1), acc_sum / max(total, 1)
+
+
+@torch.inference_mode()
+def _anchor_bc_baseline(
+    model: ChessTransformer,
+    loader: DataLoader,
+    device: torch.device,
+    amp_dtype: torch.dtype,
+    max_batches: int = 8,
+) -> float:
+    model.eval()
+    criterion = nn.CrossEntropyLoss()
+    loss_sum = 0.0
+    batches = 0
+    for batches, (x, y) in enumerate(loader, start=1):
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
+        with torch.amp.autocast(device_type=device.type, dtype=amp_dtype):
+            logits = model(x)
+        loss_sum += criterion(logits.float(), y).item()
+        if batches >= max_batches:
+            break
+    model.train()
+    return loss_sum / max(batches, 1)
 
 
 def _cycle(loader: DataLoader):
@@ -273,6 +352,7 @@ def main() -> None:
         dim_feedforward=saved_cfg.get("dim_feedforward", cfg.dim_feedforward),
         dropout=0.0,
     ).to(device)
+    model.set_gradient_checkpointing(cfg.gradient_checkpointing)
 
     opt = AdamW(
         model.parameters(),
@@ -308,13 +388,15 @@ def main() -> None:
 
     shard_list = shard_paths(cfg.sl_data_dir, cfg.sl_shard_pattern, cfg.sl_max_shards)
     if not shard_list:
-        raise FileNotFoundError(f"No SL shards found in {cfg.sl_data_dir} matching {cfg.sl_shard_pattern}")
+        raise FileNotFoundError(
+            f"No SL shards found in {cfg.sl_data_dir} matching {cfg.sl_shard_pattern}"
+        )
     if len(shard_list) <= cfg.sl_val_shards:
         train_paths = shard_list
         val_paths = shard_list[-1:]
     else:
-        train_paths = shard_list[:-cfg.sl_val_shards]
-        val_paths = shard_list[-cfg.sl_val_shards:]
+        train_paths = shard_list[: -cfg.sl_val_shards]
+        val_paths = shard_list[-cfg.sl_val_shards :]
     anchor_paths = train_paths[: max(cfg.sl_anchor_shards, 1)]
     anchor_ds = MultiShard.from_paths(anchor_paths)
     val_ds = MultiShard.from_paths(val_paths)
@@ -337,12 +419,19 @@ def main() -> None:
     anchor_iter = _cycle(anchor_loader)
     bc_criterion = nn.CrossEntropyLoss()
     writer = SummaryWriter(log_dir=cfg.save_dir / "tb")
+    anchor_bc_baseline = _anchor_bc_baseline(model, anchor_loader, device, amp_dtype)
+    previous_bc_mean: float | None = None
+    writer.add_scalar("rl/anchor_bc_baseline", anchor_bc_baseline, 0)
 
     model.train()
+    terminated_early = False
     for iteration in range(start_iter, cfg.iterations + 1):
         print(f"{_now()} RL iteration {iteration}/{cfg.iterations}")
         n_self, n_history, n_engine = _opponent_counts(cfg)
         replay_parts: list[dict[str, object]] = []
+        snapshot = _snapshot_state_bytes(
+            model, opt, scheduler, scaler, iteration - 1, global_step, best_eval_score, amp_dtype
+        )
 
         if n_self > 0:
             replay_self, summary_self = generate_replay(
@@ -385,7 +474,7 @@ def main() -> None:
             print(f"{_now()} history summary ({history_ckpt.name}): {json.dumps(summary_hist)}")
             if history_model is not None:
                 del history_model
-                torch.cuda.empty_cache()
+                _maybe_empty_cache(device)
         elif n_history > 0:
             print(f"{_now()} history pool empty; folding history games into self-play.")
             replay_self, _ = generate_replay(
@@ -443,6 +532,7 @@ def main() -> None:
             replay_parts.append(replay_self)
 
         replay = concat_replays(replay_parts)
+        _maybe_empty_cache(device)
         replay_path = cfg.save_dir / "replays" / f"iter_{iteration:03d}.npz"
         replay_path.parent.mkdir(parents=True, exist_ok=True)
         save_replay(replay_path, replay)
@@ -456,6 +546,15 @@ def main() -> None:
             drop_last=False,
         )
 
+        collapse_threshold = anchor_bc_baseline * cfg.collapse_baseline_bc_ratio
+        if previous_bc_mean is not None:
+            collapse_threshold = max(
+                collapse_threshold, previous_bc_mean * cfg.collapse_previous_bc_ratio
+            )
+        collapse_reason: str | None = None
+        iteration_bc_sum = 0.0
+        iteration_bc_batches = 0
+
         for rl_epoch in range(1, cfg.rl_epochs + 1):
             pbar = tqdm(
                 rl_loader,
@@ -463,12 +562,24 @@ def main() -> None:
                 dynamic_ncols=True,
             )
             opt.zero_grad(set_to_none=True)
-            running = {"loss": 0.0, "pg": 0.0, "bc": 0.0, "entropy": 0.0, "return": 0.0}
-            for local_step, (x_rl, y_rl, returns_rl, fens_rl) in enumerate(pbar, start=1):
+            running = {
+                "loss": 0.0,
+                "pg": 0.0,
+                "bc": 0.0,
+                "entropy": 0.0,
+                "return": 0.0,
+                "clip_frac": 0.0,
+                "logp_delta": 0.0,
+                "adv_std": 0.0,
+            }
+            for local_step, (x_rl, y_rl, returns_rl, old_logp_rl, fens_rl) in enumerate(
+                pbar, start=1
+            ):
                 x_bc, y_bc = next(anchor_iter)
                 x_rl = x_rl.to(device, non_blocking=True)
                 y_rl = y_rl.to(device, non_blocking=True)
                 returns_rl = returns_rl.to(device, non_blocking=True)
+                old_logp_rl = old_logp_rl.to(device, non_blocking=True)
                 x_bc = x_bc.to(device, non_blocking=True)
                 y_bc = y_bc.to(device, non_blocking=True)
                 legal_mask = _legal_masks(list(fens_rl), device)
@@ -482,13 +593,23 @@ def main() -> None:
                 masked_logits = logits_rl.masked_fill(~legal_mask, -torch.inf)
                 log_probs = torch.log_softmax(masked_logits, dim=1)
                 probs = torch.softmax(masked_logits, dim=1)
-                chosen_logp = log_probs.gather(1, y_rl.unsqueeze(1)).squeeze(1)
+                new_logp = log_probs.gather(1, y_rl.unsqueeze(1)).squeeze(1)
                 advantages = returns_rl - returns_rl.mean()
-                pg_loss = -(chosen_logp * advantages).mean()
+                adv_std = returns_rl.std(unbiased=False)
+                advantages = advantages / (adv_std + 1e-6)
+                ratio = torch.exp(new_logp - old_logp_rl)
+                clipped_ratio = torch.clamp(
+                    ratio,
+                    1.0 - cfg.ppo_clip_epsilon,
+                    1.0 + cfg.ppo_clip_epsilon,
+                )
+                pg_loss = -torch.minimum(ratio * advantages, clipped_ratio * advantages).mean()
                 entropy = -(probs * log_probs.masked_fill(~legal_mask, 0.0)).sum(dim=1).mean()
                 bc_loss = bc_criterion(logits_bc, y_bc)
                 lambda_bc = _lambda_bc(cfg, global_step)
                 total_loss = pg_loss + lambda_bc * bc_loss - cfg.entropy_coeff * entropy
+                clip_frac = ((ratio - 1.0).abs() > cfg.ppo_clip_epsilon).float().mean()
+                logp_delta = (new_logp - old_logp_rl).mean()
 
                 loss_val = float(total_loss.item())
                 if not torch.isfinite(total_loss) or (
@@ -501,6 +622,14 @@ def main() -> None:
                     opt.zero_grad(set_to_none=True)
                     continue
 
+                if bc_loss.item() > collapse_threshold:
+                    collapse_reason = (
+                        f"BC loss exploded to {bc_loss.item():.3f} "
+                        f"(threshold {collapse_threshold:.3f})"
+                    )
+                    pbar.close()
+                    break
+
                 loss = total_loss / cfg.grad_accum
                 scaler.scale(loss).backward()
                 running["loss"] += total_loss.item()
@@ -508,6 +637,11 @@ def main() -> None:
                 running["bc"] += bc_loss.item()
                 running["entropy"] += entropy.item()
                 running["return"] += returns_rl.mean().item()
+                running["clip_frac"] += clip_frac.item()
+                running["logp_delta"] += logp_delta.item()
+                running["adv_std"] += adv_std.item()
+                iteration_bc_sum += bc_loss.item()
+                iteration_bc_batches += 1
 
                 should_step = local_step % cfg.grad_accum == 0 or local_step == len(rl_loader)
                 if not should_step:
@@ -538,6 +672,9 @@ def main() -> None:
                     writer.add_scalar("rl/bc_loss", running["bc"], global_step)
                     writer.add_scalar("rl/entropy", running["entropy"], global_step)
                     writer.add_scalar("rl/return_mean", running["return"], global_step)
+                    writer.add_scalar("rl/clip_frac", running["clip_frac"], global_step)
+                    writer.add_scalar("rl/logp_delta", running["logp_delta"], global_step)
+                    writer.add_scalar("rl/adv_std", running["adv_std"], global_step)
                     writer.add_scalar("rl/lambda_bc", lambda_bc, global_step)
                     writer.add_scalar("rl/lr", lr_now, global_step)
                     writer.add_scalar("rl/grad_norm", grad_norm_val, global_step)
@@ -548,9 +685,50 @@ def main() -> None:
                         bc=f"{running['bc']:.3f}",
                         ent=f"{running['entropy']:.3f}",
                         ret=f"{running['return']:.3f}",
+                        clip=f"{running['clip_frac']:.3f}",
                         lr=f"{lr_now:.2e}",
                     )
-                    running = {"loss": 0.0, "pg": 0.0, "bc": 0.0, "entropy": 0.0, "return": 0.0}
+                    running = {
+                        "loss": 0.0,
+                        "pg": 0.0,
+                        "bc": 0.0,
+                        "entropy": 0.0,
+                        "return": 0.0,
+                        "clip_frac": 0.0,
+                        "logp_delta": 0.0,
+                        "adv_std": 0.0,
+                    }
+
+            if collapse_reason is not None:
+                break
+
+        if collapse_reason is not None:
+            print(f"{_now()} rollback triggered: {collapse_reason}")
+            restored_iter, global_step, best_eval_score = _restore_snapshot_bytes(
+                snapshot, model, opt, scheduler, scaler, device, amp_dtype
+            )
+            rollback_path = cfg.save_dir / "rollback.pt"
+            _save_checkpoint(
+                _build_checkpoint_state(
+                    model,
+                    opt,
+                    scheduler,
+                    scaler,
+                    restored_iter,
+                    global_step,
+                    best_eval_score,
+                    amp_dtype,
+                ),
+                rollback_path,
+            )
+            writer.add_scalar("rl/collapse_iteration", iteration, global_step)
+            _maybe_empty_cache(device)
+            terminated_early = True
+            break
+
+        iteration_bc_mean = iteration_bc_sum / max(iteration_bc_batches, 1)
+        writer.add_scalar("rl/iteration_bc_mean", iteration_bc_mean, iteration)
+        previous_bc_mean = iteration_bc_mean
 
         sl_loss, sl_acc = _sl_eval(model, val_loader, device, amp_dtype)
         writer.add_scalar("eval/sl_loss", sl_loss, iteration)
@@ -578,6 +756,7 @@ def main() -> None:
                 print(f"{_now()} engine eval: {json.dumps(series)} score={score:.4f}")
             else:
                 eval_score = sl_acc
+        _maybe_empty_cache(device)
 
         ckpt_path = cfg.save_dir / f"iter_{iteration:03d}.pt"
         _save_checkpoint(
@@ -590,13 +769,23 @@ def main() -> None:
             best_eval_score = eval_score
             _save_checkpoint(
                 _build_checkpoint_state(
-                    model, opt, scheduler, scaler, iteration, global_step, best_eval_score, amp_dtype
+                    model,
+                    opt,
+                    scheduler,
+                    scaler,
+                    iteration,
+                    global_step,
+                    best_eval_score,
+                    amp_dtype,
                 ),
                 cfg.save_dir / "best.pt",
             )
             print(f"{_now()} ★ new best RL eval score={best_eval_score:.4f}")
 
-    print(f"{_now()} RL training complete. Best eval score={best_eval_score:.4f}")
+    if terminated_early:
+        print(f"{_now()} RL training stopped after rollback. Best eval score={best_eval_score:.4f}")
+    else:
+        print(f"{_now()} RL training complete. Best eval score={best_eval_score:.4f}")
 
 
 if __name__ == "__main__":

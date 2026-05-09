@@ -12,6 +12,7 @@ Architecture:
 import torch
 import torch.nn as nn
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint
 
 from shenji.board import VOCAB_SIZE
 
@@ -89,6 +90,7 @@ class ChessTransformer(nn.Module):
             enable_nested_tensor=False,
         )
         self.policy_head = nn.Linear(d_model, 73)
+        self.gradient_checkpointing = False
 
         self._init_weights()
 
@@ -104,9 +106,23 @@ class ChessTransformer(nn.Module):
             elif isinstance(module, nn.Embedding):
                 nn.init.trunc_normal_(module.weight, std=std)
 
+    def set_gradient_checkpointing(self, enabled: bool) -> None:
+        self.gradient_checkpointing = enabled
+
+    def _encode(self, emb: Tensor) -> Tensor:
+        if not (self.training and self.gradient_checkpointing and emb.requires_grad):
+            return self.encoder(emb)
+
+        hidden = emb
+        for layer in self.encoder.layers:
+            hidden = checkpoint(lambda tensor, mod=layer: mod(tensor), hidden, use_reentrant=False)
+        if self.encoder.norm is not None:
+            hidden = self.encoder.norm(hidden)
+        return hidden
+
     def forward(self, x: Tensor) -> Tensor:  # x: (B, 71)
         emb = self.embedding(x)  # (B, 71, d)
-        enc = self.encoder(emb)  # (B, 71, d)
+        enc = self._encode(emb)  # (B, 71, d)
         sq = enc[:, :64]  # (B, 64, d)  – square representations
         logits = self.policy_head(sq)  # (B, 64, 73)
         return logits.reshape(x.size(0), -1)  # (B, 4672)

@@ -8,6 +8,7 @@ The replay format is a `.npz` file with:
     x       : uint8   (N, 71)   encoded board states
     y       : int16   (N,)      chosen move indices
     returns : float32 (N,)      discounted returns from the mover's perspective
+    old_logp: float32 (N,)      behaviour-policy log-prob of the sampled move
     fen     : <U96    (N,)      FEN before the move (used to rebuild legal masks)
     color   : int8    (N,)      1 for white mover, 0 for black mover
     source  : <U16    (N,)      "self", "history", or "engine"
@@ -47,6 +48,7 @@ class _RecordedStep:
     x: np.ndarray
     fen: str
     move_idx: int
+    old_logp: float
     color: bool
     ply: int
     source: str
@@ -68,6 +70,7 @@ class ReplayDataset(Dataset):
         self.x = replay["x"]
         self.y = replay["y"]
         self.returns = replay["returns"]
+        self.old_logp = replay["old_logp"]
         self.fen = replay["fen"]
 
     @classmethod
@@ -77,6 +80,7 @@ class ReplayDataset(Dataset):
             "x": npz["x"],
             "y": npz["y"],
             "returns": npz["returns"],
+            "old_logp": npz["old_logp"],
             "fen": npz["fen"],
         }
         return cls(replay)
@@ -88,7 +92,8 @@ class ReplayDataset(Dataset):
         x = torch.from_numpy(self.x[idx].astype(np.int64, copy=False))
         y = torch.tensor(int(self.y[idx]), dtype=torch.long)
         ret = torch.tensor(float(self.returns[idx]), dtype=torch.float32)
-        return x, y, ret, str(self.fen[idx])
+        old_logp = torch.tensor(float(self.old_logp[idx]), dtype=torch.float32)
+        return x, y, ret, old_logp, str(self.fen[idx])
 
 
 def _amp_dtype(device: torch.device) -> torch.dtype:
@@ -143,23 +148,24 @@ def _pick_moves_batch(
     temperature_switch_ply: int,
     dirichlet_alpha: float | None,
     dirichlet_eps: float,
-) -> list[tuple[int, chess.Move]]:
+) -> list[tuple[int, chess.Move, float]]:
     if not boards:
         return []
 
     x = torch.stack([BoardEncoder.encode(board) for board in boards]).to(device)
     amp_dtype = _amp_dtype(device)
-    with torch.no_grad():
+    with torch.inference_mode():
         with torch.amp.autocast(device_type=device.type, dtype=amp_dtype):
             logits = model(x)
     logits = logits.float()
 
-    picks: list[tuple[int, chess.Move]] = []
+    picks: list[tuple[int, chess.Move, float]] = []
     for row, board in zip(logits, boards, strict=True):
         mask = MoveCodec.legal_mask(board).to(row.device)
         masked = row.masked_fill(~mask, -torch.inf)
         if deterministic or mask.sum().item() <= 1:
             idx = int(masked.argmax())
+            chosen_logp = float(torch.log_softmax(masked, dim=0)[idx].item())
         else:
             temperature = _temperature_for_ply(
                 board.ply(),
@@ -177,15 +183,21 @@ def _pick_moves_batch(
                 )
                 mixed = (1.0 - dirichlet_eps) * legal_probs + dirichlet_eps * noise
                 mixed = mixed / mixed.sum()
-                idx = int(np.random.choice(legal_idx.cpu().numpy(), p=mixed))
+                legal_positions = legal_idx.cpu().numpy()
+                chosen_pos = int(np.random.choice(len(legal_positions), p=mixed))
+                idx = int(legal_positions[chosen_pos])
+                chosen_logp = float(np.log(max(mixed[chosen_pos], 1e-12)))
             else:
                 idx = int(torch.multinomial(probs, 1))
-        picks.append((idx, MoveCodec.to_move(idx, board)))
+                chosen_logp = float(torch.log_softmax(scaled, dim=0)[idx].item())
+        picks.append((idx, MoveCodec.to_move(idx, board), chosen_logp))
     return picks
 
 
 def _new_slot(game_idx: int, source: str) -> _GameSlot:
-    current_color = None if source == "self" else (chess.WHITE if game_idx % 2 == 0 else chess.BLACK)
+    current_color = (
+        None if source == "self" else (chess.WHITE if game_idx % 2 == 0 else chess.BLACK)
+    )
     return _GameSlot(board=chess.Board(), current_color=current_color, steps=[], source=source)
 
 
@@ -208,7 +220,7 @@ def _white_result(
 
 
 def _initial_replay() -> dict[str, list[Any]]:
-    return {"x": [], "y": [], "returns": [], "fen": [], "color": [], "source": []}
+    return {"x": [], "y": [], "returns": [], "old_logp": [], "fen": [], "color": [], "source": []}
 
 
 def _finalise_replay(replay: dict[str, list[Any]]) -> dict[str, np.ndarray]:
@@ -219,6 +231,7 @@ def _finalise_replay(replay: dict[str, list[Any]]) -> dict[str, np.ndarray]:
             "x": np.empty((0, 71), dtype=np.uint8),
             "y": np.empty((0,), dtype=np.int16),
             "returns": np.empty((0,), dtype=np.float32),
+            "old_logp": np.empty((0,), dtype=np.float32),
             "fen": empty_u96,
             "color": np.empty((0,), dtype=np.int8),
             "source": empty_u16,
@@ -230,6 +243,7 @@ def _finalise_replay(replay: dict[str, list[Any]]) -> dict[str, np.ndarray]:
         "x": np.stack(replay["x"]).astype(np.uint8, copy=False),
         "y": np.array(replay["y"], dtype=np.int16),
         "returns": np.array(replay["returns"], dtype=np.float32),
+        "old_logp": np.array(replay["old_logp"], dtype=np.float32),
         "fen": np.array(replay["fen"], dtype=f"<U{max(96, max_fen)}"),
         "color": np.array(replay["color"], dtype=np.int8),
         "source": np.array(replay["source"], dtype=f"<U{max(16, max_source)}"),
@@ -297,7 +311,9 @@ def _run_match_loop(
                 dirichlet_alpha=dirichlet_alpha if collect_replay else None,
                 dirichlet_eps=dirichlet_eps if collect_replay else 0.0,
             )
-            for slot_idx, (move_idx, move) in zip(current_slots_idx, current_moves, strict=True):
+            for slot_idx, (move_idx, move, old_logp) in zip(
+                current_slots_idx, current_moves, strict=True
+            ):
                 slot = slots[slot_idx]
                 if collect_replay:
                     slot.steps.append(
@@ -305,6 +321,7 @@ def _run_match_loop(
                             x=BoardEncoder.encode_np(slot.board),
                             fen=slot.board.fen(),
                             move_idx=move_idx,
+                            old_logp=old_logp,
                             color=slot.board.turn,
                             ply=slot.board.ply(),
                             source=slot.source,
@@ -312,25 +329,35 @@ def _run_match_loop(
                     )
                 mover = slot.board.turn
                 slot.board.push(move)
-                if slot.board.can_claim_threefold_repetition() or slot.board.can_claim_fifty_moves():
+                if (
+                    slot.board.can_claim_threefold_repetition()
+                    or slot.board.can_claim_fifty_moves()
+                ):
                     slot.repetition_offender = mover
 
-            opponent_moves = _pick_moves_batch(
-                opponent_model,
-                opponent_boards,
-                device,
-                deterministic=deterministic_opponent,
-                temperature_open=0.0,
-                temperature_mid=0.0,
-                temperature_switch_ply=0,
-                dirichlet_alpha=None,
-                dirichlet_eps=0.0,
-            ) if opponent_model is not None else []
-            for slot_idx, (_, move) in zip(opponent_slots_idx, opponent_moves, strict=True):
+            opponent_moves = (
+                _pick_moves_batch(
+                    opponent_model,
+                    opponent_boards,
+                    device,
+                    deterministic=deterministic_opponent,
+                    temperature_open=0.0,
+                    temperature_mid=0.0,
+                    temperature_switch_ply=0,
+                    dirichlet_alpha=None,
+                    dirichlet_eps=0.0,
+                )
+                if opponent_model is not None
+                else []
+            )
+            for slot_idx, (_, move, _) in zip(opponent_slots_idx, opponent_moves, strict=True):
                 slot = slots[slot_idx]
                 mover = slot.board.turn
                 slot.board.push(move)
-                if slot.board.can_claim_threefold_repetition() or slot.board.can_claim_fifty_moves():
+                if (
+                    slot.board.can_claim_threefold_repetition()
+                    or slot.board.can_claim_fifty_moves()
+                ):
                     slot.repetition_offender = mover
             if engine is not None:
                 for idx, slot in enumerate(slots):
@@ -362,14 +389,24 @@ def _run_match_loop(
                     else:
                         slot.board.push(move)
 
-                    if slot.board.can_claim_threefold_repetition() or slot.board.can_claim_fifty_moves():
+                    if (
+                        slot.board.can_claim_threefold_repetition()
+                        or slot.board.can_claim_fifty_moves()
+                    ):
                         slot.repetition_offender = mover
 
             next_slots: list[_GameSlot] = []
             for slot in slots:
                 max_moves_hit = slot.board.ply() >= max_moves
-                draw_claim = slot.board.can_claim_threefold_repetition() or slot.board.can_claim_fifty_moves()
-                if not max_moves_hit and not draw_claim and not slot.board.is_game_over(claim_draw=True):
+                draw_claim = (
+                    slot.board.can_claim_threefold_repetition()
+                    or slot.board.can_claim_fifty_moves()
+                )
+                if (
+                    not max_moves_hit
+                    and not draw_claim
+                    and not slot.board.is_game_over(claim_draw=True)
+                ):
                     next_slots.append(slot)
                     continue
 
@@ -396,6 +433,7 @@ def _run_match_loop(
                     replay["x"].append(step.x)
                     replay["y"].append(step.move_idx)
                     replay["returns"].append(ret)
+                    replay["old_logp"].append(step.old_logp)
                     replay["fen"].append(step.fen)
                     replay["color"].append(1 if step.color == chess.WHITE else 0)
                     replay["source"].append(step.source)
@@ -521,9 +559,7 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = load_policy_model(args.checkpoint, device)
     opponent_model = (
-        load_policy_model(args.opponent_checkpoint, device)
-        if args.opponent_checkpoint
-        else None
+        load_policy_model(args.opponent_checkpoint, device) if args.opponent_checkpoint else None
     )
     source = "engine" if args.engine_path else ("history" if args.opponent_checkpoint else "self")
     replay, summary = generate_replay(
