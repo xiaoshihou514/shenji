@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import json
 import random
-import warnings
 from datetime import datetime
 from pathlib import Path
 
@@ -66,6 +65,45 @@ def _build_scheduler(
     return SequentialLR(opt, schedulers=[warmup, cosine], milestones=[max(warmup_steps, 1)])
 
 
+def _restore_scheduler_fallback(scheduler: SequentialLR, global_step: int) -> None:
+    """Rebuild state for old checkpoints without calling scheduler.step()."""
+    state = scheduler.state_dict()
+    warmup_steps = state["_milestones"][0]
+    warm, cosine = state["_schedulers"]
+    base_lr = warm["base_lrs"][0]
+    eta_min = cosine["eta_min"]
+    t_max = cosine["T_max"]
+
+    if global_step < warmup_steps:
+        factor = warm["start_factor"] + (
+            (warm["end_factor"] - warm["start_factor"]) * global_step / max(warm["total_iters"], 1)
+        )
+        lr = base_lr * factor
+        warm["last_epoch"] = global_step
+        warm["_step_count"] = global_step + 1
+        warm["_last_lr"] = [lr]
+        cosine["last_epoch"] = -1
+        cosine["_step_count"] = 1
+        cosine["_last_lr"] = [lr]
+    else:
+        cosine_epoch = global_step - warmup_steps
+        lr = eta_min + (
+            (base_lr - eta_min) * (1 + torch.cos(torch.tensor(torch.pi * cosine_epoch / t_max)).item()) / 2
+        )
+        warm["last_epoch"] = max(warmup_steps - 1, 0)
+        warm["_step_count"] = max(warmup_steps, 1)
+        warm["_last_lr"] = [base_lr]
+        cosine["last_epoch"] = cosine_epoch
+        cosine["_step_count"] = cosine_epoch + 1
+        cosine["_last_lr"] = [lr]
+
+    state["last_epoch"] = global_step
+    state["_last_lr"] = [lr]
+    scheduler.load_state_dict(state)
+    for group in scheduler.optimizer.param_groups:
+        group["lr"] = lr
+
+
 def _load_model_only(checkpoint: Path, model: ChessTransformer, device: torch.device) -> None:
     state = torch.load(checkpoint, map_location=device, weights_only=False)
     model.load_state_dict(state["model_state"])
@@ -90,10 +128,7 @@ def _load_rl_checkpoint(
     if "scheduler_state" in state:
         scheduler.load_state_dict(state["scheduler_state"])
     else:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UserWarning)
-            for _ in range(state["global_step"]):
-                scheduler.step()
+        _restore_scheduler_fallback(scheduler, state["global_step"])
     print(
         f"Resumed RL from {path} (iter {state['iteration']}, step {state['global_step']})"
     )
