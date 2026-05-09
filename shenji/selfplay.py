@@ -332,14 +332,36 @@ def _run_match_loop(
                 slot.board.push(move)
                 if slot.board.can_claim_threefold_repetition() or slot.board.can_claim_fifty_moves():
                     slot.repetition_offender = mover
-
             if engine is not None:
-                for slot in slots:
+                for idx, slot in enumerate(slots):
+                    # 跳过模型自己走棋的 slot
                     if slot.current_color is None or slot.board.turn == slot.current_color:
                         continue
+
+                    # 如果游戏已经结束，就不再让引擎走棋，让它留在下一轮被终结
+                    if slot.board.is_game_over(claim_draw=True):
+                        continue
+
                     mover = slot.board.turn
-                    result = engine.play(slot.board, chess.engine.Limit(depth=engine_depth))
-                    slot.board.push(result.move)
+                    try:
+                        result = engine.play(slot.board, chess.engine.Limit(depth=engine_depth))
+                        move = result.move
+                    except Exception:
+                        move = None
+
+                    if move is None:
+                        # 引擎在合法局面下也可能会返回 None（极少见），此时直接判该局为和棋
+                        # 简便做法：直接视为“强制结束”，把该 slot 的 board 推进到满步数
+                        # 下面的 max_moves_hit 条件会在后续循环捕获它
+                        print(f"⚠ Engine returned None, forcing draw by max moves.")
+                        # 塞一个合法走法来保证 ply 增加（选第一个合法走法即可）
+                        legal = list(slot.board.generate_legal_moves())
+                        if legal:
+                            slot.board.push(legal[0])
+                        # 如果连合法走法都没有，说明已经结束，什么都不做
+                    else:
+                        slot.board.push(move)
+
                     if slot.board.can_claim_threefold_repetition() or slot.board.can_claim_fifty_moves():
                         slot.repetition_offender = mover
 

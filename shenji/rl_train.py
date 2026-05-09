@@ -348,6 +348,9 @@ def main() -> None:
             )
             replay_parts.append(replay_hist)
             print(f"{_now()} history summary ({history_ckpt.name}): {json.dumps(summary_hist)}")
+            if history_model is not None:
+                del history_model
+                torch.cuda.empty_cache()
         elif n_history > 0:
             print(f"{_now()} history pool empty; folding history games into self-play.")
             replay_self, _ = generate_replay(
