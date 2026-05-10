@@ -35,7 +35,7 @@ class RLConfig:
     gamma: float = 0.99
     repetition_penalty: float = 0.0
     temperature_open: float = 1.0
-    temperature_mid: float = 0.3
+    temperature_mid: float = 1.0
     temperature_switch_ply: int = 10
     dirichlet_alpha: float | None = None
     dirichlet_eps: float = 0.0
@@ -57,8 +57,8 @@ class RLConfig:
     betas: tuple[float, float] = (0.9, 0.95)
     clip_grad_norm: float = 1.0
     warmup_steps: int = 500
-    lambda_bc_start: float = 0.5
-    lambda_bc_end: float = 0.2
+    lambda_bc_start: float = 0.3
+    lambda_bc_end: float = 0.15
     lambda_bc_decay_steps: int = 10_000
     entropy_coeff: float = 0.05
     ppo_clip_epsilon: float = 0.2
@@ -70,7 +70,7 @@ class RLConfig:
     # ── logging / checkpointing ───────────────────────────────────────────────
     log_every: int = 20
     eval_every_iter: int = 1
-    eval_games: int = 20
+    eval_games: int = 50
     seed: int = 42
     resume: Path | None = None
 
@@ -105,14 +105,14 @@ class RLConfig:
         raw.setdefault("dim_feedforward", 3072)
         raw.setdefault("dropout", 0.0)
         raw.setdefault("iterations", 10)
-        raw.setdefault("rl_epochs", 2)
+        raw.setdefault("rl_epochs", 1)
         raw.setdefault("selfplay_games_per_iter", 500)
         raw.setdefault("selfplay_batch_size", 128)
         raw.setdefault("selfplay_max_moves", 300)
         raw.setdefault("gamma", 0.99)
         raw.setdefault("repetition_penalty", 0.0)
         raw.setdefault("temperature_open", 1.0)
-        raw.setdefault("temperature_mid", 0.3)
+        raw.setdefault("temperature_mid", 1.0)
         raw.setdefault("temperature_switch_ply", 10)
         raw.setdefault("dirichlet_alpha", None)
         raw.setdefault("dirichlet_eps", 0.0)
@@ -128,8 +128,8 @@ class RLConfig:
         raw.setdefault("weight_decay", 1.0e-4)
         raw.setdefault("clip_grad_norm", 1.0)
         raw.setdefault("warmup_steps", 500)
-        raw.setdefault("lambda_bc_start", 0.5)
-        raw.setdefault("lambda_bc_end", 0.2)
+        raw.setdefault("lambda_bc_start", 0.3)
+        raw.setdefault("lambda_bc_end", 0.15)
         raw.setdefault("lambda_bc_decay_steps", 10_000)
         raw.setdefault("entropy_coeff", 0.05)
         raw.setdefault("ppo_clip_epsilon", 0.2)
@@ -139,6 +139,6 @@ class RLConfig:
         raw.setdefault("collapse_baseline_bc_ratio", 3.0)
         raw.setdefault("log_every", 20)
         raw.setdefault("eval_every_iter", 1)
-        raw.setdefault("eval_games", 20)
+        raw.setdefault("eval_games", 50)
         raw.setdefault("seed", 42)
         return RLConfig(**raw)

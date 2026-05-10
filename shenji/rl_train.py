@@ -268,6 +268,24 @@ def _lambda_bc(cfg: RLConfig, global_step: int) -> float:
     return cfg.lambda_bc_start + ratio * (cfg.lambda_bc_end - cfg.lambda_bc_start)
 
 
+def _validate_policy_consistency(cfg: RLConfig) -> None:
+    errors: list[str] = []
+    if abs(cfg.temperature_open - 1.0) > 1e-8:
+        errors.append("temperature_open must be 1.0 for PPO replay consistency")
+    if abs(cfg.temperature_mid - 1.0) > 1e-8:
+        errors.append("temperature_mid must be 1.0 for PPO replay consistency")
+    if cfg.dirichlet_alpha is not None and cfg.dirichlet_eps > 0.0:
+        errors.append(
+            "Dirichlet replay noise must be disabled until PPO supports mixed-policy old_logp"
+        )
+    if errors:
+        raise ValueError("Invalid RL config:\n- " + "\n- ".join(errors))
+
+
+def _mean(total: float, count: int) -> float:
+    return total / max(count, 1)
+
+
 def _legal_masks(fens: list[str], device: torch.device) -> torch.Tensor:
     masks = [MoveCodec.legal_mask(chess.Board(fen)) for fen in fens]
     return torch.stack(masks).to(device)
@@ -335,6 +353,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = RLConfig.load(args.config)
+    _validate_policy_consistency(cfg)
     random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
     if torch.cuda.is_available():
@@ -422,6 +441,10 @@ def main() -> None:
     anchor_bc_baseline = _anchor_bc_baseline(model, anchor_loader, device, amp_dtype)
     previous_bc_mean: float | None = None
     writer.add_scalar("rl/anchor_bc_baseline", anchor_bc_baseline, 0)
+    if cfg.eval_games < 50:
+        print(
+            f"{_now()} warning: eval_games={cfg.eval_games} is noisy for RL checkpoint selection."
+        )
 
     model.train()
     terminated_early = False
@@ -563,14 +586,17 @@ def main() -> None:
             )
             opt.zero_grad(set_to_none=True)
             running = {
-                "loss": 0.0,
-                "pg": 0.0,
-                "bc": 0.0,
-                "entropy": 0.0,
-                "return": 0.0,
-                "clip_frac": 0.0,
-                "logp_delta": 0.0,
-                "adv_std": 0.0,
+                "loss_sum": 0.0,
+                "pg_sum": 0.0,
+                "bc_sum": 0.0,
+                "entropy_sum": 0.0,
+                "return_sum": 0.0,
+                "clip_frac_sum": 0.0,
+                "logp_delta_sum": 0.0,
+                "adv_std_sum": 0.0,
+                "grad_norm_sum": 0.0,
+                "batch_count": 0,
+                "update_count": 0,
             }
             for local_step, (x_rl, y_rl, returns_rl, old_logp_rl, fens_rl) in enumerate(
                 pbar, start=1
@@ -632,14 +658,15 @@ def main() -> None:
 
                 loss = total_loss / cfg.grad_accum
                 scaler.scale(loss).backward()
-                running["loss"] += total_loss.item()
-                running["pg"] += pg_loss.item()
-                running["bc"] += bc_loss.item()
-                running["entropy"] += entropy.item()
-                running["return"] += returns_rl.mean().item()
-                running["clip_frac"] += clip_frac.item()
-                running["logp_delta"] += logp_delta.item()
-                running["adv_std"] += adv_std.item()
+                running["loss_sum"] += total_loss.item()
+                running["pg_sum"] += pg_loss.item()
+                running["bc_sum"] += bc_loss.item()
+                running["entropy_sum"] += entropy.item()
+                running["return_sum"] += returns_rl.mean().item()
+                running["clip_frac_sum"] += clip_frac.item()
+                running["logp_delta_sum"] += logp_delta.item()
+                running["adv_std_sum"] += adv_std.item()
+                running["batch_count"] += 1
                 iteration_bc_sum += bc_loss.item()
                 iteration_bc_batches += 1
 
@@ -664,39 +691,53 @@ def main() -> None:
                 opt.zero_grad(set_to_none=True)
                 scheduler.step()
                 global_step += 1
+                running["grad_norm_sum"] += grad_norm_val
+                running["update_count"] += 1
 
                 if global_step % cfg.log_every == 0:
                     lr_now = opt.param_groups[0]["lr"]
-                    writer.add_scalar("rl/loss", running["loss"], global_step)
-                    writer.add_scalar("rl/pg_loss", running["pg"], global_step)
-                    writer.add_scalar("rl/bc_loss", running["bc"], global_step)
-                    writer.add_scalar("rl/entropy", running["entropy"], global_step)
-                    writer.add_scalar("rl/return_mean", running["return"], global_step)
-                    writer.add_scalar("rl/clip_frac", running["clip_frac"], global_step)
-                    writer.add_scalar("rl/logp_delta", running["logp_delta"], global_step)
-                    writer.add_scalar("rl/adv_std", running["adv_std"], global_step)
+                    mean_loss = _mean(running["loss_sum"], running["batch_count"])
+                    mean_pg = _mean(running["pg_sum"], running["batch_count"])
+                    mean_bc = _mean(running["bc_sum"], running["batch_count"])
+                    mean_entropy = _mean(running["entropy_sum"], running["batch_count"])
+                    mean_return = _mean(running["return_sum"], running["batch_count"])
+                    mean_clip = _mean(running["clip_frac_sum"], running["batch_count"])
+                    mean_logp_delta = _mean(running["logp_delta_sum"], running["batch_count"])
+                    mean_adv_std = _mean(running["adv_std_sum"], running["batch_count"])
+                    mean_grad_norm = _mean(running["grad_norm_sum"], running["update_count"])
+                    writer.add_scalar("rl/loss", mean_loss, global_step)
+                    writer.add_scalar("rl/pg_loss", mean_pg, global_step)
+                    writer.add_scalar("rl/bc_loss", mean_bc, global_step)
+                    writer.add_scalar("rl/entropy", mean_entropy, global_step)
+                    writer.add_scalar("rl/return_mean", mean_return, global_step)
+                    writer.add_scalar("rl/clip_frac", mean_clip, global_step)
+                    writer.add_scalar("rl/logp_delta", mean_logp_delta, global_step)
+                    writer.add_scalar("rl/adv_std", mean_adv_std, global_step)
                     writer.add_scalar("rl/lambda_bc", lambda_bc, global_step)
                     writer.add_scalar("rl/lr", lr_now, global_step)
-                    writer.add_scalar("rl/grad_norm", grad_norm_val, global_step)
+                    writer.add_scalar("rl/grad_norm", mean_grad_norm, global_step)
                     pbar.set_postfix(
                         step=global_step,
-                        loss=f"{running['loss']:.3f}",
-                        pg=f"{running['pg']:.3f}",
-                        bc=f"{running['bc']:.3f}",
-                        ent=f"{running['entropy']:.3f}",
-                        ret=f"{running['return']:.3f}",
-                        clip=f"{running['clip_frac']:.3f}",
+                        loss=f"{mean_loss:.3f}",
+                        pg=f"{mean_pg:.3f}",
+                        bc=f"{mean_bc:.3f}",
+                        ent=f"{mean_entropy:.3f}",
+                        ret=f"{mean_return:.3f}",
+                        clip=f"{mean_clip:.3f}",
                         lr=f"{lr_now:.2e}",
                     )
                     running = {
-                        "loss": 0.0,
-                        "pg": 0.0,
-                        "bc": 0.0,
-                        "entropy": 0.0,
-                        "return": 0.0,
-                        "clip_frac": 0.0,
-                        "logp_delta": 0.0,
-                        "adv_std": 0.0,
+                        "loss_sum": 0.0,
+                        "pg_sum": 0.0,
+                        "bc_sum": 0.0,
+                        "entropy_sum": 0.0,
+                        "return_sum": 0.0,
+                        "clip_frac_sum": 0.0,
+                        "logp_delta_sum": 0.0,
+                        "adv_std_sum": 0.0,
+                        "grad_norm_sum": 0.0,
+                        "batch_count": 0,
+                        "update_count": 0,
                     }
 
             if collapse_reason is not None:
