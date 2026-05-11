@@ -92,6 +92,16 @@ class ChessTransformer(nn.Module):
         self.policy_head = nn.Linear(d_model, 73)
         self.gradient_checkpointing = False
 
+        self.value_head = nn.Sequential(
+            nn.Linear(d_model, d_model // 2),
+            nn.GELU(),
+            nn.Linear(d_model // 2, 1)
+        )
+        # 对价值头的最后一层使用零初始化，这样初始阶段价值预测为 0，不影响策略训练
+        nn.init.zeros_(self.value_head[-1].weight)
+        if self.value_head[-1].bias is not None:
+            nn.init.zeros_(self.value_head[-1].bias)
+
         self._init_weights()
 
     def _init_weights(self) -> None:
@@ -120,12 +130,19 @@ class ChessTransformer(nn.Module):
             hidden = self.encoder.norm(hidden)
         return hidden
 
-    def forward(self, x: Tensor) -> Tensor:  # x: (B, 71)
-        emb = self.embedding(x)  # (B, 71, d)
-        enc = self._encode(emb)  # (B, 71, d)
-        sq = enc[:, :64]  # (B, 64, d)  – square representations
-        logits = self.policy_head(sq)  # (B, 64, 73)
-        return logits.reshape(x.size(0), -1)  # (B, 4672)
+    def forward(self, x: Tensor, return_value: bool = False) -> Tensor | tuple[Tensor, Tensor]:
+        emb = self.embedding(x)               # (B, 71, d)
+        enc = self._encode(emb)               # (B, 71, d)
+        sq = enc[:, :64]                      # (B, 64, d) – 棋盘格表示
+        logits = self.policy_head(sq)         # (B, 64, 73)
+        policy_logits = logits.reshape(x.size(0), -1)   # (B, 4672)
+
+        if return_value:
+            # 对所有方格做平均池化，得到全局表示
+            pooled = sq.mean(dim=1)            # (B, d)
+            value = self.value_head(pooled)    # (B, 1)
+            return policy_logits, value.squeeze(-1)   # policy (B,4672), value (B,)
+        return policy_logits
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)

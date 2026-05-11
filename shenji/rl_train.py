@@ -110,7 +110,7 @@ def _restore_scheduler_fallback(scheduler: SequentialLR, global_step: int) -> No
 
 def _load_model_only(checkpoint: Path, model: ChessTransformer, device: torch.device) -> None:
     state = torch.load(checkpoint, map_location=device, weights_only=False)
-    model.load_state_dict(state["model_state"])
+    model.load_state_dict(state["model_state"], strict=False)
 
 
 def _maybe_empty_cache(device: torch.device) -> None:
@@ -128,7 +128,7 @@ def _load_rl_checkpoint(
     amp_dtype: torch.dtype,
 ) -> tuple[int, int, float]:
     state = torch.load(path, map_location=device, weights_only=False)
-    model.load_state_dict(state["model_state"])
+    model.load_state_dict(state["model_state"], strict=False)
     opt.load_state_dict(state["opt_state"])
     ckpt_dtype_name = state.get("amp_dtype", "float16")
     cur_dtype_name = "bfloat16" if amp_dtype == torch.bfloat16 else "float16"
@@ -236,7 +236,7 @@ def _load_model_from_state(
         dim_feedforward=saved_cfg.get("dim_feedforward", fallback.dim_feedforward),
         dropout=0.0,
     ).to(device)
-    model.load_state_dict(state["model_state"])
+    model.load_state_dict(state["model_state"], strict=False)
     model.eval()
     return model
 
@@ -292,7 +292,7 @@ def _normalize_replay_returns(replay: dict[str, np.ndarray]) -> tuple[np.ndarray
     mean = float(raw_returns.mean()) if raw_returns.size else 0.0
     std = float(raw_returns.std()) if raw_returns.size else 0.0
     replay["raw_returns"] = raw_returns.copy()
-    replay["returns"] = ((raw_returns - mean) / max(std, 1e-6)).astype(np.float32, copy=False)
+    replay["returns"] = (raw_returns / max(std, 1e-6)).astype(np.float32, copy=False)
     return raw_returns, mean, std
 
 
@@ -667,6 +667,7 @@ def main() -> None:
                 "pg_sum": 0.0,
                 "bc_sum": 0.0,
                 "entropy_sum": 0.0,
+                "value_loss_sum": 0.0,
                 "return_sum": 0.0,
                 "clip_frac_sum": 0.0,
                 "logp_delta_sum": 0.0,
@@ -688,16 +689,21 @@ def main() -> None:
                 legal_mask = _legal_masks(list(fens_rl), device)
 
                 with torch.amp.autocast(device_type=device.type, dtype=amp_dtype):
-                    logits_rl = model(x_rl)
+                    # logits_rl = model(x_rl)
+                    logits_rl, values_rl = model(x_rl, return_value=True)
                     logits_bc = model(x_bc)
 
+                values_rl = values_rl.float()
                 logits_rl = logits_rl.float()
                 logits_bc = logits_bc.float()
                 masked_logits = logits_rl.masked_fill(~legal_mask, -torch.inf)
                 log_probs = torch.log_softmax(masked_logits, dim=1)
                 probs = torch.softmax(masked_logits, dim=1)
                 new_logp = log_probs.gather(1, y_rl.unsqueeze(1)).squeeze(1)
-                advantages = returns_rl
+                # 用价值函数作为基线，降低策略梯度方差
+                advantages = returns_rl - values_rl.detach()
+                # 然后做批内归一化 (可选，推荐)
+                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-6)
                 adv_std = returns_rl.std(unbiased=False)
                 ratio = torch.exp(new_logp - old_logp_rl)
                 clipped_ratio = torch.clamp(
@@ -708,8 +714,10 @@ def main() -> None:
                 pg_loss = -torch.minimum(ratio * advantages, clipped_ratio * advantages).mean()
                 entropy = -(probs * log_probs.masked_fill(~legal_mask, 0.0)).sum(dim=1).mean()
                 bc_loss = bc_criterion(logits_bc, y_bc)
+                value_loss = nn.functional.mse_loss(values_rl, returns_rl)
                 lambda_bc = _lambda_bc(cfg, global_step)
-                total_loss = pg_loss + lambda_bc * bc_loss - cfg.entropy_coeff * entropy
+                # total_loss = pg_loss + lambda_bc * bc_loss - cfg.entropy_coeff * entropy
+                total_loss = pg_loss + lambda_bc * bc_loss - cfg.entropy_coeff * entropy + 0.5 * value_loss
                 clip_frac = ((ratio - 1.0).abs() > cfg.ppo_clip_epsilon).float().mean()
                 logp_delta = (new_logp - old_logp_rl).mean()
 
@@ -736,6 +744,7 @@ def main() -> None:
                 scaler.scale(loss).backward()
                 running["loss_sum"] += total_loss.item()
                 running["pg_sum"] += pg_loss.item()
+                running["value_loss_sum"] += value_loss.item()
                 running["bc_sum"] += bc_loss.item()
                 running["entropy_sum"] += entropy.item()
                 running["return_sum"] += returns_rl.mean().item()
@@ -781,6 +790,8 @@ def main() -> None:
                     mean_logp_delta = _mean(running["logp_delta_sum"], running["batch_count"])
                     mean_adv_std = _mean(running["adv_std_sum"], running["batch_count"])
                     mean_grad_norm = _mean(running["grad_norm_sum"], running["update_count"])
+                    mean_value_loss = _mean(running["value_loss_sum"], running["batch_count"])
+                    writer.add_scalar("rl/value_loss", mean_value_loss, global_step)
                     writer.add_scalar("rl/loss", mean_loss, global_step)
                     writer.add_scalar("rl/pg_loss", mean_pg, global_step)
                     writer.add_scalar("rl/bc_loss", mean_bc, global_step)
@@ -797,6 +808,7 @@ def main() -> None:
                         loss=f"{mean_loss:.3f}",
                         pg=f"{mean_pg:.3f}",
                         bc=f"{mean_bc:.3f}",
+                        val=f"{mean_value_loss:.3f}",
                         ent=f"{mean_entropy:.3f}",
                         ret=f"{mean_return:.3f}",
                         clip=f"{mean_clip:.3f}",
@@ -806,6 +818,7 @@ def main() -> None:
                         "loss_sum": 0.0,
                         "pg_sum": 0.0,
                         "bc_sum": 0.0,
+                        "value_loss_sum": 0.0,
                         "entropy_sum": 0.0,
                         "return_sum": 0.0,
                         "clip_frac_sum": 0.0,
