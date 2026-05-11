@@ -39,10 +39,13 @@ class RLConfig:
     temperature_switch_ply: int = 10
     dirichlet_alpha: float | None = None
     dirichlet_eps: float = 0.0
+    material_reward_scale: float = 0.02
+    material_delta_clip: float | None = 3.0
+    terminal_reward_scale: float = 1.0
 
     # ── opponent mix ──────────────────────────────────────────────────────────
-    opponent_selfplay_frac: float = 1.0
-    opponent_history_frac: float = 0.0
+    opponent_selfplay_frac: float = 0.8
+    opponent_history_frac: float = 0.2
     opponent_engine_frac: float = 0.0
     history_pool_size: int = 5
     engine_path: Path | None = None
@@ -57,10 +60,10 @@ class RLConfig:
     betas: tuple[float, float] = (0.9, 0.95)
     clip_grad_norm: float = 1.0
     warmup_steps: int = 500
-    lambda_bc_start: float = 0.3
-    lambda_bc_end: float = 0.15
+    lambda_bc_start: float = 0.15
+    lambda_bc_end: float = 0.05
     lambda_bc_decay_steps: int = 10_000
-    entropy_coeff: float = 0.05
+    entropy_coeff: float = 0.02
     ppo_clip_epsilon: float = 0.2
     gradient_checkpointing: bool = True
     loss_spike_threshold: float | None = 20.0
@@ -116,8 +119,11 @@ class RLConfig:
         raw.setdefault("temperature_switch_ply", 10)
         raw.setdefault("dirichlet_alpha", None)
         raw.setdefault("dirichlet_eps", 0.0)
-        raw.setdefault("opponent_selfplay_frac", 1.0)
-        raw.setdefault("opponent_history_frac", 0.0)
+        raw.setdefault("material_reward_scale", 0.02)
+        raw.setdefault("material_delta_clip", 3.0)
+        raw.setdefault("terminal_reward_scale", 1.0)
+        raw.setdefault("opponent_selfplay_frac", 0.8)
+        raw.setdefault("opponent_history_frac", 0.2)
         raw.setdefault("opponent_engine_frac", 0.0)
         raw.setdefault("history_pool_size", 5)
         raw.setdefault("engine_depth", 5)
@@ -128,10 +134,10 @@ class RLConfig:
         raw.setdefault("weight_decay", 1.0e-4)
         raw.setdefault("clip_grad_norm", 1.0)
         raw.setdefault("warmup_steps", 500)
-        raw.setdefault("lambda_bc_start", 0.3)
-        raw.setdefault("lambda_bc_end", 0.15)
+        raw.setdefault("lambda_bc_start", 0.15)
+        raw.setdefault("lambda_bc_end", 0.05)
         raw.setdefault("lambda_bc_decay_steps", 10_000)
-        raw.setdefault("entropy_coeff", 0.05)
+        raw.setdefault("entropy_coeff", 0.02)
         raw.setdefault("ppo_clip_epsilon", 0.2)
         raw.setdefault("gradient_checkpointing", True)
         raw.setdefault("loss_spike_threshold", 20.0)

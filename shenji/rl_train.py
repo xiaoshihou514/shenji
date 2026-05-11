@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 import chess
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
@@ -286,6 +287,61 @@ def _mean(total: float, count: int) -> float:
     return total / max(count, 1)
 
 
+def _normalize_replay_returns(replay: dict[str, np.ndarray]) -> tuple[np.ndarray, float, float]:
+    raw_returns = replay.get("raw_returns", replay["returns"]).astype(np.float32, copy=False)
+    mean = float(raw_returns.mean()) if raw_returns.size else 0.0
+    std = float(raw_returns.std()) if raw_returns.size else 0.0
+    replay["raw_returns"] = raw_returns.copy()
+    replay["returns"] = ((raw_returns - mean) / max(std, 1e-6)).astype(np.float32, copy=False)
+    return raw_returns, mean, std
+
+
+def _log_replay_diagnostics(
+    writer: SummaryWriter,
+    replay: dict[str, np.ndarray],
+    iteration: int,
+) -> None:
+    raw_returns = replay.get("raw_returns", replay["returns"]).astype(np.float32, copy=False)
+    norm_returns = replay["returns"].astype(np.float32, copy=False)
+    shaped = replay.get("shaped_reward", np.zeros_like(raw_returns))
+    terminal = replay.get("terminal_reward", np.zeros_like(raw_returns))
+    writer.add_scalar("replay/raw_return_mean", float(raw_returns.mean()), iteration)
+    writer.add_scalar("replay/raw_return_std", float(raw_returns.std()), iteration)
+    writer.add_scalar("replay/norm_return_mean", float(norm_returns.mean()), iteration)
+    writer.add_scalar("replay/norm_return_std", float(norm_returns.std()), iteration)
+    writer.add_scalar("replay/shaped_reward_mean", float(shaped.mean()), iteration)
+    writer.add_scalar("replay/shaped_reward_std", float(shaped.std()), iteration)
+    writer.add_scalar("replay/terminal_reward_mean", float(terminal.mean()), iteration)
+    writer.add_scalar(
+        "replay/shaping_fraction",
+        float(np.mean(np.abs(shaped) / np.maximum(np.abs(raw_returns), 1e-6))),
+        iteration,
+    )
+    for source_name in ("self", "history", "engine"):
+        mask = replay["source"] == source_name
+        if not np.any(mask):
+            continue
+        writer.add_scalar(f"replay/{source_name}_count", int(mask.sum()), iteration)
+        writer.add_scalar(
+            f"replay/{source_name}_raw_return_mean", float(raw_returns[mask].mean()), iteration
+        )
+        writer.add_scalar(
+            f"replay/{source_name}_norm_return_mean",
+            float(norm_returns[mask].mean()),
+            iteration,
+        )
+        writer.add_scalar(
+            f"replay/{source_name}_shaped_reward_mean",
+            float(shaped[mask].mean()),
+            iteration,
+        )
+        writer.add_scalar(
+            f"replay/{source_name}_terminal_reward_mean",
+            float(terminal[mask].mean()),
+            iteration,
+        )
+
+
 def _legal_masks(fens: list[str], device: torch.device) -> torch.Tensor:
     masks = [MoveCodec.legal_mask(chess.Board(fen)) for fen in fens]
     return torch.stack(masks).to(device)
@@ -471,6 +527,9 @@ def main() -> None:
                 dirichlet_alpha=cfg.dirichlet_alpha,
                 dirichlet_eps=cfg.dirichlet_eps,
                 repetition_penalty=cfg.repetition_penalty,
+                material_reward_scale=cfg.material_reward_scale,
+                material_delta_clip=cfg.material_delta_clip,
+                terminal_reward_scale=cfg.terminal_reward_scale,
             )
             replay_parts.append(replay_self)
             print(f"{_now()} self-play summary: {json.dumps(summary_self)}")
@@ -492,6 +551,9 @@ def main() -> None:
                 source="history",
                 opponent_model=history_model,
                 repetition_penalty=cfg.repetition_penalty,
+                material_reward_scale=cfg.material_reward_scale,
+                material_delta_clip=cfg.material_delta_clip,
+                terminal_reward_scale=cfg.terminal_reward_scale,
             )
             replay_parts.append(replay_hist)
             print(f"{_now()} history summary ({history_ckpt.name}): {json.dumps(summary_hist)}")
@@ -514,6 +576,9 @@ def main() -> None:
                 dirichlet_alpha=cfg.dirichlet_alpha,
                 dirichlet_eps=cfg.dirichlet_eps,
                 repetition_penalty=cfg.repetition_penalty,
+                material_reward_scale=cfg.material_reward_scale,
+                material_delta_clip=cfg.material_delta_clip,
+                terminal_reward_scale=cfg.terminal_reward_scale,
             )
             replay_parts.append(replay_self)
 
@@ -532,6 +597,9 @@ def main() -> None:
                 engine_path=cfg.engine_path,
                 engine_depth=cfg.engine_depth,
                 repetition_penalty=cfg.repetition_penalty,
+                material_reward_scale=cfg.material_reward_scale,
+                material_delta_clip=cfg.material_delta_clip,
+                terminal_reward_scale=cfg.terminal_reward_scale,
             )
             replay_parts.append(replay_engine)
             print(f"{_now()} engine summary: {json.dumps(summary_engine)}")
@@ -551,10 +619,19 @@ def main() -> None:
                 dirichlet_alpha=cfg.dirichlet_alpha,
                 dirichlet_eps=cfg.dirichlet_eps,
                 repetition_penalty=cfg.repetition_penalty,
+                material_reward_scale=cfg.material_reward_scale,
+                material_delta_clip=cfg.material_delta_clip,
+                terminal_reward_scale=cfg.terminal_reward_scale,
             )
             replay_parts.append(replay_self)
 
         replay = concat_replays(replay_parts)
+        raw_returns, raw_return_mean, raw_return_std = _normalize_replay_returns(replay)
+        _log_replay_diagnostics(writer, replay, iteration)
+        print(
+            f"{_now()} replay returns: raw_mean={raw_return_mean:.4f} raw_std={raw_return_std:.4f} "
+            f"norm_std={float(replay['returns'].std()):.4f}"
+        )
         _maybe_empty_cache(device)
         replay_path = cfg.save_dir / "replays" / f"iter_{iteration:03d}.npz"
         replay_path.parent.mkdir(parents=True, exist_ok=True)
@@ -620,9 +697,8 @@ def main() -> None:
                 log_probs = torch.log_softmax(masked_logits, dim=1)
                 probs = torch.softmax(masked_logits, dim=1)
                 new_logp = log_probs.gather(1, y_rl.unsqueeze(1)).squeeze(1)
-                advantages = returns_rl - returns_rl.mean()
+                advantages = returns_rl
                 adv_std = returns_rl.std(unbiased=False)
-                advantages = advantages / (adv_std + 1e-6)
                 ratio = torch.exp(new_logp - old_logp_rl)
                 clipped_ratio = torch.clamp(
                     ratio,
@@ -795,6 +871,25 @@ def main() -> None:
                 writer.add_scalar("eval/engine_draws", series["draws"], iteration)
                 writer.add_scalar("eval/engine_losses", series["losses"], iteration)
                 print(f"{_now()} engine eval: {json.dumps(series)} score={score:.4f}")
+            elif cfg.sl_checkpoint:
+                reference_eval_model = _load_model_from_state(cfg.sl_checkpoint, device, cfg)
+                series = evaluate_matches(
+                    model,
+                    device,
+                    games=cfg.eval_games,
+                    batch_size=min(cfg.selfplay_batch_size, cfg.eval_games),
+                    max_moves=cfg.selfplay_max_moves,
+                    opponent_model=reference_eval_model,
+                )
+                score = (series["wins"] + 0.5 * series["draws"]) / max(cfg.eval_games, 1)
+                eval_score = score
+                writer.add_scalar("eval/reference_score", score, iteration)
+                writer.add_scalar("eval/reference_wins", series["wins"], iteration)
+                writer.add_scalar("eval/reference_draws", series["draws"], iteration)
+                writer.add_scalar("eval/reference_losses", series["losses"], iteration)
+                print(f"{_now()} reference eval: {json.dumps(series)} score={score:.4f}")
+                del reference_eval_model
+                _maybe_empty_cache(device)
             else:
                 eval_score = sl_acc
         _maybe_empty_cache(device)

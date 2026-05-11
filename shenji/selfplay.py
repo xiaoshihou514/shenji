@@ -7,8 +7,11 @@ Usage:
 The replay format is a `.npz` file with:
     x       : uint8   (N, 71)   encoded board states
     y       : int16   (N,)      chosen move indices
-    returns : float32 (N,)      discounted returns from the mover's perspective
+    returns : float32 (N,)      rewards-to-go (normalized later by rl_train.py)
+    raw_returns: float32 (N,)    raw rewards-to-go before replay normalization
     old_logp: float32 (N,)      behaviour-policy log-prob of the sampled move
+    shaped_reward: float32 (N,)  per-step dense reward before discounting
+    terminal_reward: float32 (N,) terminal reward contribution on that step
     fen     : <U96    (N,)      FEN before the move (used to rebuild legal masks)
     color   : int8    (N,)      1 for white mover, 0 for black mover
     source  : <U16    (N,)      "self", "history", or "engine"
@@ -33,6 +36,15 @@ from tqdm.auto import tqdm
 from shenji.board import BoardEncoder, MoveCodec
 from shenji.model import ChessTransformer
 
+PIECE_VALUES = {
+    chess.PAWN: 1.0,
+    chess.KNIGHT: 3.0,
+    chess.BISHOP: 3.0,
+    chess.ROOK: 5.0,
+    chess.QUEEN: 9.0,
+    chess.KING: 0.0,
+}
+
 __all__ = [
     "ReplayDataset",
     "concat_replays",
@@ -49,9 +61,11 @@ class _RecordedStep:
     fen: str
     move_idx: int
     old_logp: float
+    shaped_reward: float
     color: bool
     ply: int
     source: str
+    trainable: bool
 
 
 @dataclass(slots=True)
@@ -219,8 +233,51 @@ def _white_result(
     return result
 
 
+def _material_balance(board: chess.Board, color: chess.Color) -> float:
+    own = 0.0
+    opp = 0.0
+    for piece_type, value in PIECE_VALUES.items():
+        own += len(board.pieces(piece_type, color)) * value
+        opp += len(board.pieces(piece_type, not color)) * value
+    return own - opp
+
+
+def _shaped_material_reward(
+    before_board: chess.Board,
+    after_board: chess.Board,
+    mover: chess.Color,
+    material_reward_scale: float,
+    material_delta_clip: float | None,
+) -> float:
+    delta = _material_balance(after_board, mover) - _material_balance(before_board, mover)
+    if material_delta_clip is not None:
+        delta = float(np.clip(delta, -material_delta_clip, material_delta_clip))
+    return material_reward_scale * delta
+
+
+def _compute_returns(rewards: list[float], gamma: float) -> list[float]:
+    out: list[float] = []
+    acc = 0.0
+    for reward in reversed(rewards):
+        acc = reward + gamma * acc
+        out.append(acc)
+    out.reverse()
+    return out
+
+
 def _initial_replay() -> dict[str, list[Any]]:
-    return {"x": [], "y": [], "returns": [], "old_logp": [], "fen": [], "color": [], "source": []}
+    return {
+        "x": [],
+        "y": [],
+        "returns": [],
+        "raw_returns": [],
+        "old_logp": [],
+        "shaped_reward": [],
+        "terminal_reward": [],
+        "fen": [],
+        "color": [],
+        "source": [],
+    }
 
 
 def _finalise_replay(replay: dict[str, list[Any]]) -> dict[str, np.ndarray]:
@@ -231,7 +288,10 @@ def _finalise_replay(replay: dict[str, list[Any]]) -> dict[str, np.ndarray]:
             "x": np.empty((0, 71), dtype=np.uint8),
             "y": np.empty((0,), dtype=np.int16),
             "returns": np.empty((0,), dtype=np.float32),
+            "raw_returns": np.empty((0,), dtype=np.float32),
             "old_logp": np.empty((0,), dtype=np.float32),
+            "shaped_reward": np.empty((0,), dtype=np.float32),
+            "terminal_reward": np.empty((0,), dtype=np.float32),
             "fen": empty_u96,
             "color": np.empty((0,), dtype=np.int8),
             "source": empty_u16,
@@ -243,7 +303,10 @@ def _finalise_replay(replay: dict[str, list[Any]]) -> dict[str, np.ndarray]:
         "x": np.stack(replay["x"]).astype(np.uint8, copy=False),
         "y": np.array(replay["y"], dtype=np.int16),
         "returns": np.array(replay["returns"], dtype=np.float32),
+        "raw_returns": np.array(replay["raw_returns"], dtype=np.float32),
         "old_logp": np.array(replay["old_logp"], dtype=np.float32),
+        "shaped_reward": np.array(replay["shaped_reward"], dtype=np.float32),
+        "terminal_reward": np.array(replay["terminal_reward"], dtype=np.float32),
         "fen": np.array(replay["fen"], dtype=f"<U{max(96, max_fen)}"),
         "color": np.array(replay["color"], dtype=np.int8),
         "source": np.array(replay["source"], dtype=f"<U{max(16, max_source)}"),
@@ -261,6 +324,9 @@ def _run_match_loop(
     temperature_switch_ply: int,
     gamma: float,
     repetition_penalty: float,
+    material_reward_scale: float,
+    material_delta_clip: float | None,
+    terminal_reward_scale: float,
     *,
     collect_replay: bool,
     source: str,
@@ -315,20 +381,30 @@ def _run_match_loop(
                 current_slots_idx, current_moves, strict=True
             ):
                 slot = slots[slot_idx]
+                mover = slot.board.turn
+                before_board = slot.board.copy(stack=False)
+                slot.board.push(move)
+                shaped_reward = _shaped_material_reward(
+                    before_board,
+                    slot.board,
+                    mover,
+                    material_reward_scale=material_reward_scale,
+                    material_delta_clip=material_delta_clip,
+                )
                 if collect_replay:
                     slot.steps.append(
                         _RecordedStep(
-                            x=BoardEncoder.encode_np(slot.board),
-                            fen=slot.board.fen(),
+                            x=BoardEncoder.encode_np(before_board),
+                            fen=before_board.fen(),
                             move_idx=move_idx,
                             old_logp=old_logp,
-                            color=slot.board.turn,
-                            ply=slot.board.ply(),
+                            shaped_reward=shaped_reward,
+                            color=mover,
+                            ply=before_board.ply(),
                             source=slot.source,
+                            trainable=True,
                         )
                     )
-                mover = slot.board.turn
-                slot.board.push(move)
                 if (
                     slot.board.can_claim_threefold_repetition()
                     or slot.board.can_claim_fifty_moves()
@@ -353,7 +429,29 @@ def _run_match_loop(
             for slot_idx, (_, move, _) in zip(opponent_slots_idx, opponent_moves, strict=True):
                 slot = slots[slot_idx]
                 mover = slot.board.turn
+                before_board = slot.board.copy(stack=False)
                 slot.board.push(move)
+                shaped_reward = _shaped_material_reward(
+                    before_board,
+                    slot.board,
+                    mover,
+                    material_reward_scale=material_reward_scale,
+                    material_delta_clip=material_delta_clip,
+                )
+                if collect_replay:
+                    slot.steps.append(
+                        _RecordedStep(
+                            x=np.empty((0,), dtype=np.uint8),
+                            fen="",
+                            move_idx=-1,
+                            old_logp=0.0,
+                            shaped_reward=shaped_reward,
+                            color=mover,
+                            ply=before_board.ply(),
+                            source=slot.source,
+                            trainable=False,
+                        )
+                    )
                 if (
                     slot.board.can_claim_threefold_repetition()
                     or slot.board.can_claim_fifty_moves()
@@ -370,6 +468,7 @@ def _run_match_loop(
                         continue
 
                     mover = slot.board.turn
+                    before_board = slot.board.copy(stack=False)
                     try:
                         result = engine.play(slot.board, chess.engine.Limit(depth=engine_depth))
                         move = result.move
@@ -388,6 +487,27 @@ def _run_match_loop(
                         # 如果连合法走法都没有，说明已经结束，什么都不做
                     else:
                         slot.board.push(move)
+                    shaped_reward = _shaped_material_reward(
+                        before_board,
+                        slot.board,
+                        mover,
+                        material_reward_scale=material_reward_scale,
+                        material_delta_clip=material_delta_clip,
+                    )
+                    if collect_replay:
+                        slot.steps.append(
+                            _RecordedStep(
+                                x=np.empty((0,), dtype=np.uint8),
+                                fen="",
+                                move_idx=-1,
+                                old_logp=0.0,
+                                shaped_reward=shaped_reward,
+                                color=mover,
+                                ply=before_board.ply(),
+                                source=slot.source,
+                                trainable=False,
+                            )
+                        )
 
                     if (
                         slot.board.can_claim_threefold_repetition()
@@ -426,14 +546,28 @@ def _run_match_loop(
                 else:
                     summary["draws"] += 1
 
-                final_ply = slot.board.ply()
-                for step in slot.steps:
-                    outcome = white_result if step.color == chess.WHITE else -white_result
-                    ret = (gamma ** max(final_ply - 1 - step.ply, 0)) * outcome
+                terminal_by_step = [0.0] * len(slot.steps)
+                if terminal_by_step:
+                    last_color = slot.steps[-1].color
+                    terminal_outcome = white_result if last_color == chess.WHITE else -white_result
+                    terminal_by_step[-1] = terminal_reward_scale * terminal_outcome
+                rewards = [
+                    step.shaped_reward + terminal
+                    for step, terminal in zip(slot.steps, terminal_by_step, strict=True)
+                ]
+                returns = _compute_returns(rewards, gamma)
+                for step, terminal_reward, ret in zip(
+                    slot.steps, terminal_by_step, returns, strict=True
+                ):
+                    if not step.trainable:
+                        continue
                     replay["x"].append(step.x)
                     replay["y"].append(step.move_idx)
                     replay["returns"].append(ret)
+                    replay["raw_returns"].append(ret)
                     replay["old_logp"].append(step.old_logp)
+                    replay["shaped_reward"].append(step.shaped_reward)
+                    replay["terminal_reward"].append(terminal_reward)
                     replay["fen"].append(step.fen)
                     replay["color"].append(1 if step.color == chess.WHITE else 0)
                     replay["source"].append(step.source)
@@ -462,6 +596,9 @@ def generate_replay(
     temperature_open: float,
     temperature_mid: float,
     temperature_switch_ply: int,
+    material_reward_scale: float = 0.02,
+    material_delta_clip: float | None = 3.0,
+    terminal_reward_scale: float = 1.0,
     *,
     source: str = "self",
     opponent_model: ChessTransformer | None = None,
@@ -482,6 +619,9 @@ def generate_replay(
         temperature_switch_ply=temperature_switch_ply,
         gamma=gamma,
         repetition_penalty=repetition_penalty,
+        material_reward_scale=material_reward_scale,
+        material_delta_clip=material_delta_clip,
+        terminal_reward_scale=terminal_reward_scale,
         collect_replay=True,
         source=source,
         deterministic_current=False,
@@ -516,6 +656,9 @@ def evaluate_matches(
         temperature_switch_ply=0,
         gamma=1.0,
         repetition_penalty=0.0,
+        material_reward_scale=0.0,
+        material_delta_clip=None,
+        terminal_reward_scale=0.0,
         collect_replay=False,
         source="eval",
         deterministic_current=True,
@@ -538,11 +681,14 @@ def main() -> None:
     parser.add_argument("--max-moves", type=int, default=300)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--temperature-open", type=float, default=1.0)
-    parser.add_argument("--temperature-mid", type=float, default=0.3)
+    parser.add_argument("--temperature-mid", type=float, default=1.0)
     parser.add_argument("--temperature-switch-ply", type=int, default=10)
     parser.add_argument("--dirichlet-alpha", type=float, default=None)
     parser.add_argument("--dirichlet-eps", type=float, default=0.0)
     parser.add_argument("--repetition-penalty", type=float, default=0.0)
+    parser.add_argument("--material-reward-scale", type=float, default=0.02)
+    parser.add_argument("--material-delta-clip", type=float, default=3.0)
+    parser.add_argument("--terminal-reward-scale", type=float, default=1.0)
     parser.add_argument("--opponent-checkpoint", type=Path, default=None)
     parser.add_argument("--engine-path", type=Path, default=None)
     parser.add_argument("--engine-depth", type=int, default=5)
@@ -572,6 +718,9 @@ def main() -> None:
         temperature_open=args.temperature_open,
         temperature_mid=args.temperature_mid,
         temperature_switch_ply=args.temperature_switch_ply,
+        material_reward_scale=args.material_reward_scale,
+        material_delta_clip=args.material_delta_clip,
+        terminal_reward_scale=args.terminal_reward_scale,
         source=source,
         opponent_model=opponent_model,
         engine_path=args.engine_path,
