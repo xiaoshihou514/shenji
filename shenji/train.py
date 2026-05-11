@@ -16,6 +16,7 @@ Features:
 """
 
 import argparse
+import copy
 from datetime import datetime
 from pathlib import Path
 
@@ -50,6 +51,91 @@ def _save_checkpoint(state: dict, path: Path) -> None:
     tmp.rename(path)  # near-atomic rename
 
 
+_ALLOWED_LEGACY_MISSING_PREFIXES = ("value_head.",)
+
+
+def _load_model_state_compat(model: ChessTransformer, model_state: dict) -> tuple[bool, list[str]]:
+    missing_keys, unexpected_keys = model.load_state_dict(model_state, strict=False)
+    suspicious_missing = [
+        key for key in missing_keys if not key.startswith(_ALLOWED_LEGACY_MISSING_PREFIXES)
+    ]
+    if suspicious_missing or unexpected_keys:
+        details: list[str] = []
+        if suspicious_missing:
+            details.append(f"unexpected missing keys: {suspicious_missing}")
+        if unexpected_keys:
+            details.append(f"unexpected checkpoint keys: {unexpected_keys}")
+        raise RuntimeError("Incompatible checkpoint model_state: " + "; ".join(details))
+    legacy_mode = bool(missing_keys)
+    return legacy_mode, list(missing_keys)
+
+
+def _migrate_legacy_optimizer_state(saved_opt_state: dict, opt: AdamW) -> tuple[dict, dict]:
+    current_opt_state = opt.state_dict()
+    saved_groups = saved_opt_state.get("param_groups", [])
+    current_groups = current_opt_state.get("param_groups", [])
+    if len(saved_groups) != len(current_groups):
+        raise RuntimeError(
+            "Incompatible optimizer state: saved/current param_group count mismatch "
+            f"({len(saved_groups)} vs {len(current_groups)})"
+        )
+
+    migrated = {"state": {}, "param_groups": []}
+    saved_state = saved_opt_state.get("state", {})
+    legacy_params = 0
+    restored_params = 0
+    new_params = 0
+
+    for group_idx, (saved_group, current_group) in enumerate(
+        zip(saved_groups, current_groups, strict=True)
+    ):
+        saved_params = list(saved_group["params"])
+        current_params = list(current_group["params"])
+        if len(saved_params) > len(current_params):
+            raise RuntimeError(
+                "Incompatible optimizer state: saved checkpoint has more parameters than the "
+                f"current optimizer in group {group_idx} ({len(saved_params)} > {len(current_params)})"
+            )
+
+        if len(saved_params) < len(current_params):
+            legacy_params += len(saved_params)
+            new_params += len(current_params) - len(saved_params)
+        else:
+            legacy_params += len(saved_params)
+
+        migrated_group = copy.deepcopy(current_group)
+        for key, value in saved_group.items():
+            if key == "params":
+                continue
+            migrated_group[key] = copy.deepcopy(value)
+        migrated_group["params"] = current_params
+        migrated["param_groups"].append(migrated_group)
+
+        shared_current_params = current_params[: len(saved_params)]
+        for saved_param, current_param in zip(saved_params, shared_current_params, strict=True):
+            if saved_param not in saved_state:
+                continue
+            migrated["state"][current_param] = {
+                key: value.clone() if torch.is_tensor(value) else copy.deepcopy(value)
+                for key, value in saved_state[saved_param].items()
+            }
+            restored_params += 1
+
+    if new_params == 0:
+        raise RuntimeError(
+            "Legacy optimizer migration was requested, but no new parameters were detected."
+        )
+
+    meta = {
+        "legacy_mode": True,
+        "saved_param_count": legacy_params,
+        "restored_state_count": restored_params,
+        "new_param_count": new_params,
+        "current_param_count": sum(len(group["params"]) for group in current_groups),
+    }
+    return migrated, meta
+
+
 def _load_checkpoint(
     path: Path,
     model: ChessTransformer,
@@ -66,8 +152,20 @@ def _load_checkpoint(
     versa), so we skip it and let the scaler re-initialise cleanly.
     """
     state = torch.load(path, map_location=device, weights_only=False)
-    model.load_state_dict(state["model_state"])
-    opt.load_state_dict(state["opt_state"])
+    legacy_model_mode, missing_keys = _load_model_state_compat(model, state["model_state"])
+
+    opt_state = state["opt_state"]
+    current_opt_state = opt.state_dict()
+    saved_group_sizes = [len(group["params"]) for group in opt_state.get("param_groups", [])]
+    current_group_sizes = [
+        len(group["params"]) for group in current_opt_state.get("param_groups", [])
+    ]
+    legacy_optimizer_meta: dict | None = None
+    if saved_group_sizes == current_group_sizes:
+        opt.load_state_dict(opt_state)
+    else:
+        migrated_opt_state, legacy_optimizer_meta = _migrate_legacy_optimizer_state(opt_state, opt)
+        opt.load_state_dict(migrated_opt_state)
 
     ckpt_dtype_name = state.get("amp_dtype", "float16")  # old checkpoints default to fp16
     cur_dtype_name = "bfloat16" if amp_dtype == torch.bfloat16 else "float16"
@@ -85,6 +183,16 @@ def _load_checkpoint(
         _restore_scheduler_fallback(scheduler, state["global_step"])
 
     print(f"Resumed from {path}  (epoch {state['epoch']}, step {state['global_step']})")
+    if legacy_model_mode:
+        print("  compatibility mode: partially loaded model_state from a legacy checkpoint")
+        print(f"  initialized new parameters: {missing_keys}")
+    if legacy_optimizer_meta is not None:
+        print("  compatibility mode: migrated optimizer state for legacy checkpoint")
+        print(
+            "  restored optimizer state for "
+            f"{legacy_optimizer_meta['restored_state_count']} parameter(s); "
+            f"initialized {legacy_optimizer_meta['new_param_count']} new parameter(s)"
+        )
     print(f"  restored lr={scheduler.get_last_lr()[0]:.8g}")
     return state["epoch"], state["global_step"]
 
@@ -93,9 +201,7 @@ def _build_scheduler(
     opt: AdamW, warmup_steps: int, total_steps: int, min_lr: float
 ) -> SequentialLR:
     warmup = LinearLR(opt, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps)
-    cosine = CosineAnnealingLR(
-        opt, T_max=max(total_steps - warmup_steps, 1), eta_min=min_lr
-    )
+    cosine = CosineAnnealingLR(opt, T_max=max(total_steps - warmup_steps, 1), eta_min=min_lr)
     return SequentialLR(opt, schedulers=[warmup, cosine], milestones=[warmup_steps])
 
 
@@ -122,7 +228,9 @@ def _restore_scheduler_fallback(scheduler: SequentialLR, global_step: int) -> No
     else:
         cosine_epoch = global_step - warmup_steps
         lr = eta_min + (
-            (base_lr - eta_min) * (1 + torch.cos(torch.tensor(torch.pi * cosine_epoch / t_max)).item()) / 2
+            (base_lr - eta_min)
+            * (1 + torch.cos(torch.tensor(torch.pi * cosine_epoch / t_max)).item())
+            / 2
         )
         warm["last_epoch"] = max(warmup_steps - 1, 0)
         warm["_step_count"] = max(warmup_steps, 1)
@@ -138,7 +246,9 @@ def _restore_scheduler_fallback(scheduler: SequentialLR, global_step: int) -> No
         group["lr"] = lr
 
 
-def _build_checkpoint_state(model, opt, scheduler, scaler, epoch, global_step, cfg, amp_dtype) -> dict:
+def _build_checkpoint_state(
+    model, opt, scheduler, scaler, epoch, global_step, cfg, amp_dtype
+) -> dict:
     return {
         "epoch": epoch,
         "global_step": global_step,
@@ -304,8 +414,10 @@ def main() -> None:
                 cfg.loss_spike_threshold is not None
                 and loss_val > cfg.loss_spike_threshold / cfg.grad_accum
             ):
-                print(f"\n⚠  Bad loss ({loss_val * cfg.grad_accum:.2f}) at epoch "
-                      f"{epoch} local_step {local_step}, skipping batch.")
+                print(
+                    f"\n⚠  Bad loss ({loss_val * cfg.grad_accum:.2f}) at epoch "
+                    f"{epoch} local_step {local_step}, skipping batch."
+                )
                 opt.zero_grad(set_to_none=True)
                 batch_loss = 0.0
                 skipped += 1
@@ -321,8 +433,10 @@ def main() -> None:
                 # ── NaN/Inf gradient guard ────────────────────────────────────
                 grad_norm_val = grad_norm.item() if torch.is_tensor(grad_norm) else float(grad_norm)
                 if not torch.isfinite(grad_norm):
-                    print(f"\n⚠  Non-finite grad_norm at epoch {epoch} "
-                          f"step {global_step}, skipping update.")
+                    print(
+                        f"\n⚠  Non-finite grad_norm at epoch {epoch} "
+                        f"step {global_step}, skipping update."
+                    )
                     opt.zero_grad(set_to_none=True)
                     scaler.update()  # must call to keep scaler state consistent
                     batch_loss = 0.0
