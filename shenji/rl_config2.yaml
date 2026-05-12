@@ -1,0 +1,89 @@
+##############################
+# RL bootstrap
+##############################
+sl_checkpoint: ./checkpoints_small/rl_new_step_4/iter_030.pt
+sl_data_dir: ./data
+save_dir: ./checkpoints_small/rl_new_step_5
+sl_shard_pattern: "shard_*.npz"
+sl_anchor_shards: 2
+sl_val_shards: 1
+# sl_max_shards: 10
+num_workers: 4
+
+##############################
+# Model fallback
+##############################
+d_model: 768
+nhead: 12
+num_layers: 12
+dim_feedforward: 3072
+dropout: 0.0
+
+##############################
+# RL loop
+##############################
+iterations: 30
+rl_epochs: 2                 # 重复利用 replay 数据
+selfplay_games_per_iter: 400
+selfplay_batch_size: 128
+selfplay_max_moves: 300
+gamma: 0.99
+repetition_penalty: 0.0
+temperature_open: 1.0
+temperature_mid: 1.0
+temperature_switch_ply: 10
+dirichlet_alpha: null
+dirichlet_eps: 0.0
+material_reward_scale: 0.05
+material_delta_clip: 3.0
+terminal_reward_scale: 5.0     # 加大终局奖励，让胜负信号更明确
+
+##############################
+# Opponent mix
+##############################
+opponent_selfplay_frac: 0.3
+opponent_history_frac: 0.2
+opponent_engine_frac: 0.5
+history_pool_size: 5
+engine_path: /vol/bitbucket/ky723/uv/tool/bin/stockfish
+engine_depth: 3
+
+##############################
+# Optimisation (REINFORCE + baseline)
+##############################
+batch_size: 256
+grad_accum: 4
+lr: 3.0e-6
+min_lr: 1.0e-7
+weight_decay: 1.0e-4
+betas: [0.9, 0.95]
+clip_grad_norm: 1.0
+warmup_steps: 100
+
+# BC anchor
+lambda_bc_start: 0.05          # 轻微保留监督知识即可
+lambda_bc_end: 0.01
+lambda_bc_decay_steps: 20000
+
+# Entropy / value head
+entropy_coeff: 0.02
+value_loss_coeff: 0.5          # 新增：价值函数损失权重
+
+# Loss guard
+loss_spike_threshold: 20.0
+
+# Collapse guard (基于 BC 损失突变)
+collapse_previous_bc_ratio: 1.5
+collapse_baseline_bc_ratio: 2.0
+
+# Gradient checkpointing
+gradient_checkpointing: true
+
+##############################
+# Logging / checkpointing
+##############################
+log_every: 20
+eval_every_iter: 1
+eval_games: 50
+seed: 42
+# resume: ./rl_checkpoints/iter_003.pt

@@ -64,11 +64,11 @@ class RLConfig:
     lambda_bc_end: float = 0.05
     lambda_bc_decay_steps: int = 10_000
     entropy_coeff: float = 0.02
-    ppo_clip_epsilon: float = 0.2
     gradient_checkpointing: bool = True
     loss_spike_threshold: float | None = 20.0
     collapse_previous_bc_ratio: float = 2.0
     collapse_baseline_bc_ratio: float = 3.0
+    value_loss_coeff: float = 0.5
 
     # ── logging / checkpointing ───────────────────────────────────────────────
     log_every: int = 20
@@ -109,6 +109,7 @@ class RLConfig:
         raw.setdefault("dropout", 0.0)
         raw.setdefault("iterations", 10)
         raw.setdefault("rl_epochs", 1)
+        raw.setdefault("value_loss_coeff", 0.5)
         raw.setdefault("selfplay_games_per_iter", 500)
         raw.setdefault("selfplay_batch_size", 128)
         raw.setdefault("selfplay_max_moves", 300)
@@ -138,7 +139,6 @@ class RLConfig:
         raw.setdefault("lambda_bc_end", 0.05)
         raw.setdefault("lambda_bc_decay_steps", 10_000)
         raw.setdefault("entropy_coeff", 0.02)
-        raw.setdefault("ppo_clip_epsilon", 0.2)
         raw.setdefault("gradient_checkpointing", True)
         raw.setdefault("loss_spike_threshold", 20.0)
         raw.setdefault("collapse_previous_bc_ratio", 2.0)

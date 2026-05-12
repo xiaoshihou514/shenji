@@ -1,0 +1,3 @@
+_gpu34 From scratch, with bf16 and nan check, gpu34, config4, 50%
+_small Resumed from epoch 9, gpu33, config2, 51%
+_big 50 shards, gpu32, config3

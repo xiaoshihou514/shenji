@@ -1,13 +1,18 @@
 """
-rl_train.py – reinforce the supervised checkpoint with PPO and a BC anchor.
+rl_train.py – REINFORCE with value baseline + BC anchor (Route B).
 
 Usage:
     uv run shenji/rl_train.py --config shenji/rl_config.yaml
 
-The training loop intentionally keeps the current policy architecture unchanged:
-it loads the SL checkpoint weights, starts with a fresh optimiser, and fine-tunes
-with a policy-gradient loss on self-play data plus a cross-entropy anchor on
-supervised shards.
+Replaces the original PPO-based training with a simple policy gradient
+baseline, using a trained value head for variance reduction.
+
+Key changes from the original:
+    - value head is trained jointly with MSE loss
+    - advantages = returns - values (no clipping, no ratio)
+    - policy loss = - (log_prob * advantages).mean()
+    - BC anchor retained with configurable lambda_bc
+    - entropy bonus retained
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ import chess
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
@@ -68,7 +74,6 @@ def _build_scheduler(
 
 
 def _restore_scheduler_fallback(scheduler: SequentialLR, global_step: int) -> None:
-    """Rebuild state for old checkpoints without calling scheduler.step()."""
     state = scheduler.state_dict()
     warmup_steps = state["_milestones"][0]
     warm, cosine = state["_schedulers"]
@@ -272,13 +277,11 @@ def _lambda_bc(cfg: RLConfig, global_step: int) -> float:
 def _validate_policy_consistency(cfg: RLConfig) -> None:
     errors: list[str] = []
     if abs(cfg.temperature_open - 1.0) > 1e-8:
-        errors.append("temperature_open must be 1.0 for PPO replay consistency")
+        errors.append("temperature_open must be 1.0 for replay consistency (for now)")
     if abs(cfg.temperature_mid - 1.0) > 1e-8:
-        errors.append("temperature_mid must be 1.0 for PPO replay consistency")
+        errors.append("temperature_mid must be 1.0 for replay consistency (for now)")
     if cfg.dirichlet_alpha is not None and cfg.dirichlet_eps > 0.0:
-        errors.append(
-            "Dirichlet replay noise must be disabled until PPO supports mixed-policy old_logp"
-        )
+        errors.append("Dirichlet replay noise must be disabled")
     if errors:
         raise ValueError("Invalid RL config:\n- " + "\n- ".join(errors))
 
@@ -404,7 +407,7 @@ def _cycle(loader: DataLoader):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="RL fine-tuning for ChessTransformer")
+    parser = argparse.ArgumentParser(description="RL fine-tuning for ChessTransformer (REINFORCE + baseline)")
     parser.add_argument("--config", required=True, help="Path to shenji/rl_config.yaml")
     args = parser.parse_args()
 
@@ -502,6 +505,9 @@ def main() -> None:
             f"{_now()} warning: eval_games={cfg.eval_games} is noisy for RL checkpoint selection."
         )
 
+    # Value head MSE loss function
+    value_criterion = nn.MSELoss()
+
     model.train()
     terminated_early = False
     for iteration in range(start_iter, cfg.iterations + 1):
@@ -557,9 +563,8 @@ def main() -> None:
             )
             replay_parts.append(replay_hist)
             print(f"{_now()} history summary ({history_ckpt.name}): {json.dumps(summary_hist)}")
-            if history_model is not None:
-                del history_model
-                _maybe_empty_cache(device)
+            del history_model
+            _maybe_empty_cache(device)
         elif n_history > 0:
             print(f"{_now()} history pool empty; folding history games into self-play.")
             replay_self, _ = generate_replay(
@@ -666,10 +671,10 @@ def main() -> None:
                 "loss_sum": 0.0,
                 "pg_sum": 0.0,
                 "bc_sum": 0.0,
-                "entropy_sum": 0.0,
                 "value_loss_sum": 0.0,
+                "entropy_sum": 0.0,
                 "return_sum": 0.0,
-                "clip_frac_sum": 0.0,
+                "clip_frac_sum": 0.0,       # kept for compatibility, will be zero
                 "logp_delta_sum": 0.0,
                 "adv_std_sum": 0.0,
                 "grad_norm_sum": 0.0,
@@ -688,38 +693,51 @@ def main() -> None:
                 y_bc = y_bc.to(device, non_blocking=True)
                 legal_mask = _legal_masks(list(fens_rl), device)
 
+                # ── REINFORCE with value baseline ────────────────────────────
                 with torch.amp.autocast(device_type=device.type, dtype=amp_dtype):
-                    # logits_rl = model(x_rl)
                     logits_rl, values_rl = model(x_rl, return_value=True)
-                    logits_bc = model(x_bc)
+                    logits_bc = model(x_bc)                     # for BC anchor
 
-                values_rl = values_rl.float()
+                # Ensure fp32 for numerical stability
                 logits_rl = logits_rl.float()
+                values_rl = values_rl.float()
                 logits_bc = logits_bc.float()
+
                 masked_logits = logits_rl.masked_fill(~legal_mask, -torch.inf)
                 log_probs = torch.log_softmax(masked_logits, dim=1)
                 probs = torch.softmax(masked_logits, dim=1)
                 new_logp = log_probs.gather(1, y_rl.unsqueeze(1)).squeeze(1)
-                # 用价值函数作为基线，降低策略梯度方差
+
+                # Advantages: return minus learned value baseline
                 advantages = returns_rl - values_rl.detach()
-                # 然后做批内归一化 (可选，推荐)
+                # Optional batch normalization
                 advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-6)
-                adv_std = returns_rl.std(unbiased=False)
-                ratio = torch.exp(new_logp - old_logp_rl)
-                clipped_ratio = torch.clamp(
-                    ratio,
-                    1.0 - cfg.ppo_clip_epsilon,
-                    1.0 + cfg.ppo_clip_epsilon,
-                )
-                pg_loss = -torch.minimum(ratio * advantages, clipped_ratio * advantages).mean()
+
+                # Policy gradient loss (REINFORCE)
+                pg_loss = -(new_logp * advantages).mean()
+
+                # Entropy bonus
                 entropy = -(probs * log_probs.masked_fill(~legal_mask, 0.0)).sum(dim=1).mean()
+
+                # BC anchor loss
                 bc_loss = bc_criterion(logits_bc, y_bc)
-                value_loss = nn.functional.mse_loss(values_rl, returns_rl)
+
+                # Value loss (MSE)
+                value_loss = value_criterion(values_rl, returns_rl)
+
+                # Total loss
                 lambda_bc = _lambda_bc(cfg, global_step)
-                # total_loss = pg_loss + lambda_bc * bc_loss - cfg.entropy_coeff * entropy
-                total_loss = pg_loss + lambda_bc * bc_loss - cfg.entropy_coeff * entropy + 0.5 * value_loss
-                clip_frac = ((ratio - 1.0).abs() > cfg.ppo_clip_epsilon).float().mean()
-                logp_delta = (new_logp - old_logp_rl).mean()
+                total_loss = (
+                    pg_loss
+                    + lambda_bc * bc_loss
+                    + cfg.value_loss_coeff * value_loss
+                    - cfg.entropy_coeff * entropy
+                )
+
+                # Logging stubs (PPO clip/logp_delta not used but kept at zero)
+                clip_frac = torch.tensor(0.0, device=device)
+                logp_delta = new_logp - old_logp_rl
+                adv_std = advantages.std(unbiased=False)
 
                 loss_val = float(total_loss.item())
                 if not torch.isfinite(total_loss) or (
@@ -742,14 +760,15 @@ def main() -> None:
 
                 loss = total_loss / cfg.grad_accum
                 scaler.scale(loss).backward()
+
                 running["loss_sum"] += total_loss.item()
                 running["pg_sum"] += pg_loss.item()
-                running["value_loss_sum"] += value_loss.item()
                 running["bc_sum"] += bc_loss.item()
+                running["value_loss_sum"] += value_loss.item()
                 running["entropy_sum"] += entropy.item()
                 running["return_sum"] += returns_rl.mean().item()
                 running["clip_frac_sum"] += clip_frac.item()
-                running["logp_delta_sum"] += logp_delta.item()
+                running["logp_delta_sum"] += logp_delta.mean().item()
                 running["adv_std_sum"] += adv_std.item()
                 running["batch_count"] += 1
                 iteration_bc_sum += bc_loss.item()
@@ -784,20 +803,20 @@ def main() -> None:
                     mean_loss = _mean(running["loss_sum"], running["batch_count"])
                     mean_pg = _mean(running["pg_sum"], running["batch_count"])
                     mean_bc = _mean(running["bc_sum"], running["batch_count"])
+                    mean_value = _mean(running["value_loss_sum"], running["batch_count"])
                     mean_entropy = _mean(running["entropy_sum"], running["batch_count"])
                     mean_return = _mean(running["return_sum"], running["batch_count"])
                     mean_clip = _mean(running["clip_frac_sum"], running["batch_count"])
                     mean_logp_delta = _mean(running["logp_delta_sum"], running["batch_count"])
                     mean_adv_std = _mean(running["adv_std_sum"], running["batch_count"])
                     mean_grad_norm = _mean(running["grad_norm_sum"], running["update_count"])
-                    mean_value_loss = _mean(running["value_loss_sum"], running["batch_count"])
-                    writer.add_scalar("rl/value_loss", mean_value_loss, global_step)
                     writer.add_scalar("rl/loss", mean_loss, global_step)
                     writer.add_scalar("rl/pg_loss", mean_pg, global_step)
                     writer.add_scalar("rl/bc_loss", mean_bc, global_step)
+                    writer.add_scalar("rl/value_loss", mean_value, global_step)
                     writer.add_scalar("rl/entropy", mean_entropy, global_step)
                     writer.add_scalar("rl/return_mean", mean_return, global_step)
-                    writer.add_scalar("rl/clip_frac", mean_clip, global_step)
+                    writer.add_scalar("rl/clip_frac", mean_clip, global_step)   # always 0
                     writer.add_scalar("rl/logp_delta", mean_logp_delta, global_step)
                     writer.add_scalar("rl/adv_std", mean_adv_std, global_step)
                     writer.add_scalar("rl/lambda_bc", lambda_bc, global_step)
@@ -808,10 +827,9 @@ def main() -> None:
                         loss=f"{mean_loss:.3f}",
                         pg=f"{mean_pg:.3f}",
                         bc=f"{mean_bc:.3f}",
-                        val=f"{mean_value_loss:.3f}",
+                        val=f"{mean_value:.3f}",
                         ent=f"{mean_entropy:.3f}",
                         ret=f"{mean_return:.3f}",
-                        clip=f"{mean_clip:.3f}",
                         lr=f"{lr_now:.2e}",
                     )
                     running = {
